@@ -423,11 +423,42 @@ pub fn list_cars(conn: &Connection, input: CarFilter) -> Result<Page<Car>> {
     Ok(Page { rows, total: filter.total(conn, "cars c")? })
 }
 
-pub fn list_appointments(conn: &Connection, input: AppointmentFilter) -> Result<Page<Appointment>> {
-    const FROM: &str = "appointments a
-        JOIN clients cl ON cl.ClientID = a.ClientID
-        JOIN cars c ON c.CarID = a.CarID";
+const APPOINTMENT_FROM: &str = "appointments a
+    JOIN clients cl ON cl.ClientID = a.ClientID
+    JOIN cars c ON c.CarID = a.CarID";
 
+fn appointment_select() -> String {
+    format!(
+        "SELECT a.AppointmentID, a.ClientID, a.CarID, a.TimeDate, a.IsDone, a.Duration,
+                cl.Phone, {CAR_LABEL} FROM {APPOINTMENT_FROM}"
+    )
+}
+
+fn appointment_from_row(r: &Row) -> rusqlite::Result<Appointment> {
+    Ok(Appointment {
+        appointment_id: r.get(0)?,
+        client_id: r.get(1)?,
+        car_id: r.get(2)?,
+        time_date: r.get(3)?,
+        is_done: r.get(4)?,
+        duration: r.get(5)?,
+        phone: r.get(6)?,
+        car_label: r.get(7)?,
+    })
+}
+
+/// Every appointment starting on a day from `from` to `to`, both included.
+pub fn appointments_between(conn: &Connection, from: &str, to: &str) -> Result<Vec<Appointment>> {
+    let sql = format!(
+        "{} WHERE substr(a.TimeDate, 1, 10) BETWEEN ?1 AND ?2 ORDER BY a.TimeDate",
+        appointment_select()
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map(params![from, to], appointment_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn list_appointments(conn: &Connection, input: AppointmentFilter) -> Result<Page<Appointment>> {
     let mut filter = Filter::default();
     filter.search(
         &input.search,
@@ -443,23 +474,8 @@ pub fn list_appointments(conn: &Connection, input: AppointmentFilter) -> Result<
         filter.add("substr(a.TimeDate, 1, 10) <= ?".into(), to);
     }
 
-    let select = format!(
-        "SELECT a.AppointmentID, a.ClientID, a.CarID, a.TimeDate, a.IsDone, a.Duration,
-                cl.Phone, {CAR_LABEL} FROM {FROM}"
-    );
-    let rows = filter.rows(conn, &select, "a.TimeDate DESC", input.page, |r| {
-        Ok(Appointment {
-            appointment_id: r.get(0)?,
-            client_id: r.get(1)?,
-            car_id: r.get(2)?,
-            time_date: r.get(3)?,
-            is_done: r.get(4)?,
-            duration: r.get(5)?,
-            phone: r.get(6)?,
-            car_label: r.get(7)?,
-        })
-    })?;
-    Ok(Page { rows, total: filter.total(conn, FROM)? })
+    let rows = filter.rows(conn, &appointment_select(), "a.TimeDate DESC", input.page, appointment_from_row)?;
+    Ok(Page { rows, total: filter.total(conn, APPOINTMENT_FROM)? })
 }
 
 /// Clients for a picker. Those linked to `car_id` come first.
@@ -994,6 +1010,30 @@ mod tests {
         assert_eq!(total(None, None, None), 2);
         assert_eq!(total(Some(true), None, None), 1);
         assert_eq!(total(None, Some("2024-05-01"), Some("2024-05-01")), 1);
+    }
+
+    #[test]
+    fn appointments_between_includes_both_end_days_in_time_order() {
+        let mut conn = test_connection();
+        let car_id = car(&mut conn, "B1AAA");
+        let client_id = client(&mut conn, "0722000000", vec![]);
+        for time_date in [
+            "2030-01-13T23:30",
+            "2030-01-14T08:00",
+            "2030-01-20T23:30",
+            "2030-01-14T07:00",
+            "2030-01-21T00:00",
+        ] {
+            save_appointment(&mut conn, appointment(client_id, car_id, time_date, false)).unwrap();
+        }
+
+        let found: Vec<String> = appointments_between(&conn, "2030-01-14", "2030-01-20")
+            .unwrap()
+            .into_iter()
+            .map(|a| a.time_date)
+            .collect();
+
+        assert_eq!(found, ["2030-01-14T07:00", "2030-01-14T08:00", "2030-01-20T23:30"]);
     }
 
     #[test]

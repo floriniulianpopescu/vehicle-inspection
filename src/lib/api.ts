@@ -85,6 +85,8 @@ export const api = {
   listCars: (filter: CarFilter) => invoke<Page<Car>>("list_cars", { filter }),
   listAppointments: (filter: AppointmentFilter) =>
     invoke<Page<Appointment>>("list_appointments", { filter }),
+  appointmentsBetween: (from: string, to: string) =>
+    invoke<Appointment[]>("appointments_between", { from, to }),
   clientOptions: (search: string, linkedTo: number | null) =>
     invoke<PickerOption[]>("client_options", { search, linkedTo }),
   carOptions: (search: string, linkedTo: number | null) =>

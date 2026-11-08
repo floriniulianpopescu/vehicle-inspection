@@ -16,17 +16,19 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api, errorMessage, type Appointment, type PickerOption, type RevisionPrompt } from "@/lib/api";
+import { loadCalendarSettings } from "@/lib/calendar";
 import { displayDate, parseDate, parseTime, todayIso } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 
-const DEFAULT_DURATION = 30;
-
 export function AppointmentDialog({
   appointment,
+  initialTimeDate,
   onClose,
   onSaved,
 }: {
   appointment: Appointment | null;
+  /** Prefills a new appointment, e.g. from the calendar slot that was clicked. */
+  initialTimeDate?: string;
   onClose: () => void;
   onSaved: (prompt: RevisionPrompt | null) => void;
 }) {
@@ -37,9 +39,12 @@ export function AppointmentDialog({
   const [car, setCar] = useState<PickerOption[]>(
     appointment ? [{ id: appointment.carId, label: appointment.carLabel, linked: true }] : [],
   );
-  const [date, setDate] = useState(displayDate(appointment?.timeDate ?? todayIso()));
-  const [time, setTime] = useState(appointment?.timeDate.slice(11, 16) ?? "");
-  const [duration, setDuration] = useState(String(appointment?.duration ?? DEFAULT_DURATION));
+  const start = appointment?.timeDate ?? initialTimeDate;
+  const [date, setDate] = useState(displayDate(start ?? todayIso()));
+  const [time, setTime] = useState(start?.slice(11, 16) ?? "");
+  const [duration, setDuration] = useState(
+    () => String(appointment?.duration ?? loadCalendarSettings().slotMinutes),
+  );
   const [isDone, setIsDone] = useState(appointment?.isDone ?? false);
   const [creating, setCreating] = useState<"client" | "car" | null>(null);
   const [error, setError] = useState<string | null>(null);

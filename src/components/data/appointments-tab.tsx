@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { PlusIcon } from "lucide-react";
 import { toast } from "sonner";
 import { AppointmentDialog } from "@/components/data/appointment-dialog";
-import { DeleteDialog } from "@/components/data/delete-dialog";
+import { DeleteAppointmentDialog } from "@/components/data/delete-dialog";
 import { RevisionDialog } from "@/components/data/revision-dialog";
 import { EmptyRow, Pager, RowActions } from "@/components/data/table-parts";
 import { Button } from "@/components/ui/button";
@@ -172,13 +172,8 @@ export function AppointmentsTab({
         />
       )}
       {deleting && (
-        <DeleteDialog
-          title={t.data.deleteAppointment}
-          loadPreview={async () => ({
-            cars: [],
-            appointments: [{ timeDate: deleting.timeDate, plate: deleting.carLabel }],
-          })}
-          onConfirm={() => api.deleteAppointment(deleting.appointmentId)}
+        <DeleteAppointmentDialog
+          appointment={deleting}
           onClose={() => setDeleting(null)}
           onDeleted={() => {
             setDeleting(null);

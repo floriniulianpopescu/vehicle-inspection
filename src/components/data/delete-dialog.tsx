@@ -9,9 +9,33 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { errorMessage, type DeletePreview } from "@/lib/api";
+import { api, errorMessage, type Appointment, type DeletePreview } from "@/lib/api";
 import { displayDateTime } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
+
+export function DeleteAppointmentDialog({
+  appointment,
+  onClose,
+  onDeleted,
+}: {
+  appointment: Appointment;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <DeleteDialog
+      title={t.data.deleteAppointment}
+      loadPreview={async () => ({
+        cars: [],
+        appointments: [{ timeDate: appointment.timeDate, plate: appointment.carLabel }],
+      })}
+      onConfirm={() => api.deleteAppointment(appointment.appointmentId)}
+      onClose={onClose}
+      onDeleted={onDeleted}
+    />
+  );
+}
 
 /** Lists everything a delete will remove and asks for confirmation. */
 export function DeleteDialog({

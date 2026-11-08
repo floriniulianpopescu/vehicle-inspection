@@ -128,3 +128,13 @@
     @apply font-sans;
     }
 }
+
+@layer components {
+  .appointment-hatch {
+    --hatch-line: color-mix(in oklch, var(--foreground) 14%, transparent);
+    background-color: color-mix(in oklch, var(--foreground) 7%, var(--background));
+    background-image:
+      repeating-linear-gradient(45deg, var(--hatch-line) 0 1px, transparent 1px 7px),
+      repeating-linear-gradient(-45deg, var(--hatch-line) 0 1px, transparent 1px 7px);
+  }
+}

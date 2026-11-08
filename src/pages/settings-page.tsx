@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "next-themes";
+import { CalendarSettingsCard } from "@/components/calendar-settings-card";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import {
@@ -69,6 +70,8 @@ export function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <CalendarSettingsCard />
 
       <Card>
         <CardHeader>

@@ -29,6 +29,11 @@ pub fn list_appointments(db: Db<'_>, filter: AppointmentFilter) -> Result<Page<A
 }
 
 #[tauri::command]
+pub fn appointments_between(db: Db<'_>, from: String, to: String) -> Result<Vec<Appointment>, AppError> {
+    db.with(|conn| data::appointments_between(conn, &from, &to))
+}
+
+#[tauri::command]
 pub fn client_options(db: Db<'_>, search: String, linked_to: Option<i64>) -> Result<Vec<PickerOption>, AppError> {
     db.with(|conn| data::client_options(conn, &search, linked_to))
 }

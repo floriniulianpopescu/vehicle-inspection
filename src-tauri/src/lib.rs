@@ -23,6 +23,7 @@ pub fn run() {
             commands::list_clients,
             commands::list_cars,
             commands::list_appointments,
+            commands::appointments_between,
             commands::client_options,
             commands::car_options,
             commands::save_client,
