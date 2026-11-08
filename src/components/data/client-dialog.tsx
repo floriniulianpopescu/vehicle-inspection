@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { EntityPicker } from "@/components/data/entity-picker";
 import { Field, FormError } from "@/components/data/field";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -10,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { api, errorMessage, type Client, type PickerOption } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
@@ -25,6 +27,7 @@ export function ClientDialog({
   const { t } = useI18n();
   const [phone, setPhone] = useState(client?.phone ?? "");
   const [cars, setCars] = useState(client?.cars ?? []);
+  const [smsOptOut, setSmsOptOut] = useState(client?.smsOptOut ?? false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit(event: FormEvent) {
@@ -33,6 +36,7 @@ export function ClientDialog({
       const saved = await api.saveClient({
         clientId: client?.clientId ?? null,
         phone,
+        smsOptOut,
         carIds: cars.map((car) => car.id),
       });
       onSaved(saved);
@@ -59,6 +63,13 @@ export function ClientDialog({
             multiple
             linkedTo={client?.clientId ?? null}
           />
+          <Label className="gap-2">
+            <Checkbox
+              checked={smsOptOut}
+              onCheckedChange={(checked) => setSmsOptOut(checked === true)}
+            />
+            {t.data.smsOptOut}
+          </Label>
           <FormError message={error} />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>

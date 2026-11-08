@@ -27,7 +27,7 @@ export function DeleteAppointmentDialog({
     <DeleteDialog
       title={t.data.deleteAppointment}
       loadPreview={async () => ({
-        cars: [],
+        cars: [], messages: 0,
         appointments: [{ timeDate: appointment.timeDate, plate: appointment.carLabel }],
       })}
       onConfirm={() => api.deleteAppointment(appointment.appointmentId)}
@@ -71,7 +71,7 @@ export function DeleteDialog({
     }
   }
 
-  const nothingListed = preview && !preview.cars.length && !preview.appointments.length;
+  const nothingListed = preview && !preview.cars.length && !preview.appointments.length && !preview.messages;
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -108,6 +108,13 @@ export function DeleteDialog({
                     </li>
                   ))}
                 </ul>
+              </section>
+            )}
+            {preview.messages > 0 && (
+              <section>
+                <h3 className="font-medium">
+                  {t.data.messages} ({preview.messages})
+                </h3>
               </section>
             )}
           </div>

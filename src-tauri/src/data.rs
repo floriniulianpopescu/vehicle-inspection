@@ -7,7 +7,7 @@ use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
-const PAGE_SIZE: i64 = 50;
+pub(crate) const PAGE_SIZE: i64 = 50;
 const OPTION_LIMIT: i64 = 50;
 const DUE_SOON_DAYS: i64 = 30;
 const MAX_DURATION_MINUTES: i64 = 24 * 60;
@@ -15,7 +15,7 @@ const MAX_DURATION_MINUTES: i64 = 24 * 60;
 const CAR_LABEL: &str = "c.Plate || ' · ' || c.Manufacturer || ' ' || c.Model";
 
 /// Clamps to the end of the month, so 31 August + 6 months is 28 February.
-const NEXT_REVISION: &str = "date(c.LastRevision, '+' || c.RevisionFrequency || ' months', 'floor')";
+pub(crate) const NEXT_REVISION: &str = "date(c.LastRevision, '+' || c.RevisionFrequency || ' months', 'floor')";
 
 /// Cars whose only linked client is `?1`, which go away with that client.
 const ORPHAN_CARS: &str = "SELECT l.CarID FROM carsclients l WHERE l.ClientID = ?1 AND NOT EXISTS
@@ -26,8 +26,12 @@ const ORPHAN_CARS: &str = "SELECT l.CarID FROM carsclients l WHERE l.ClientID = 
 pub struct AppError(String);
 
 impl AppError {
-    fn code(code: &str) -> Self {
+    pub(crate) fn code(code: &str) -> Self {
         Self(code.to_string())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 
     pub fn from_message(message: String) -> Self {
@@ -56,8 +60,8 @@ fn duplicate_as(code: &'static str) -> impl Fn(rusqlite::Error) -> AppError {
 
 #[derive(Serialize)]
 pub struct Page<T> {
-    rows: Vec<T>,
-    total: i64,
+    pub(crate) rows: Vec<T>,
+    pub(crate) total: i64,
 }
 
 #[derive(Serialize)]
@@ -73,6 +77,7 @@ pub struct PickerOption {
 pub struct Client {
     client_id: i64,
     phone: String,
+    sms_opt_out: bool,
     cars: Vec<PickerOption>,
 }
 
@@ -134,6 +139,7 @@ pub struct AppointmentFilter {
 pub struct ClientInput {
     client_id: Option<i64>,
     phone: String,
+    sms_opt_out: bool,
     car_ids: Vec<i64>,
 }
 
@@ -189,6 +195,7 @@ pub struct DeleteAppointmentItem {
 pub struct DeletePreview {
     cars: Vec<String>,
     appointments: Vec<DeleteAppointmentItem>,
+    messages: i64,
 }
 
 /// Collects WHERE conditions and their bound values.
@@ -251,7 +258,7 @@ fn like(expression: &str) -> String {
     format!("{expression} LIKE ? ESCAPE '\\'")
 }
 
-fn revision_state_sql() -> String {
+pub(crate) fn revision_state_sql() -> String {
     format!(
         "CASE WHEN c.LastRevision IS NULL THEN 'unknown'
               WHEN {NEXT_REVISION} < date('now', 'localtime') THEN 'overdue'
@@ -294,7 +301,7 @@ fn normalize_plate(plate: &str) -> Result<String> {
 }
 
 /// SQLite returns a different string for impossible dates such as 31 February.
-fn has_format(conn: &Connection, format: &str, value: &str) -> Result<bool> {
+pub(crate) fn has_format(conn: &Connection, format: &str, value: &str) -> Result<bool> {
     Ok(conn.query_row("SELECT strftime(?1, ?2) IS ?2", params![format, value], |r| r.get(0))?)
 }
 
@@ -363,15 +370,15 @@ pub fn list_clients(conn: &Connection, input: ClientFilter) -> Result<Page<Clien
     );
     let found = filter.rows(
         conn,
-        "SELECT c.ClientID, c.Phone FROM clients c",
+        "SELECT c.ClientID, c.Phone, c.SmsOptOut FROM clients c",
         "c.Phone",
         input.page,
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)),
     )?;
     let rows = found
         .into_iter()
-        .map(|(client_id, phone)| {
-            Ok(Client { client_id, phone, cars: linked_cars(conn, client_id)? })
+        .map(|(client_id, phone, sms_opt_out)| {
+            Ok(Client { client_id, phone, sms_opt_out, cars: linked_cars(conn, client_id)? })
         })
         .collect::<Result<_>>()?;
     Ok(Page { rows, total: filter.total(conn, "clients c")? })
@@ -526,13 +533,19 @@ pub fn save_client(conn: &mut Connection, input: ClientInput) -> Result<PickerOp
     let client_id = match input.client_id {
         Some(id) => {
             let changed = tx
-                .execute("UPDATE clients SET Phone = ?1 WHERE ClientID = ?2", params![phone, id])
+                .execute(
+                    "UPDATE clients SET Phone = ?1, SmsOptOut = ?2 WHERE ClientID = ?3",
+                    params![phone, input.sms_opt_out, id],
+                )
                 .map_err(duplicate_as("phone_exists"))?;
             require_changed(changed)?;
             id
         }
         None => {
-            tx.execute("INSERT INTO clients (Phone) VALUES (?1)", params![phone])
+            tx.execute(
+                "INSERT INTO clients (Phone, SmsOptOut) VALUES (?1, ?2)",
+                params![phone, input.sms_opt_out],
+            )
                 .map_err(duplicate_as("phone_exists"))?;
             tx.last_insert_rowid()
         }
@@ -687,7 +700,13 @@ pub fn set_last_revision(conn: &Connection, car_id: i64, value: Option<String>) 
     )?)
 }
 
-fn preview(conn: &Connection, cars_sql: &str, appointments_where: &str, id: i64) -> Result<DeletePreview> {
+fn preview(
+    conn: &Connection,
+    cars_sql: &str,
+    appointments_where: &str,
+    messages_where: &str,
+    id: i64,
+) -> Result<DeletePreview> {
     let mut statement = conn.prepare(cars_sql)?;
     let cars = statement
         .query_map([id], |r| r.get(0))?
@@ -700,18 +719,24 @@ fn preview(conn: &Connection, cars_sql: &str, appointments_where: &str, id: i64)
     let appointments = statement
         .query_map([id], |r| Ok(DeleteAppointmentItem { time_date: r.get(0)?, plate: r.get(1)? }))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(DeletePreview { cars, appointments })
+    let messages = conn.query_row(
+        &format!("SELECT COUNT(*) FROM messages m WHERE {messages_where}"),
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(DeletePreview { cars, appointments, messages })
 }
 
 pub fn preview_delete_client(conn: &Connection, client_id: i64) -> Result<DeletePreview> {
     let cars = format!("SELECT {CAR_LABEL} FROM cars c WHERE c.CarID IN ({ORPHAN_CARS}) ORDER BY c.Plate");
     let appointments = format!("a.ClientID = ?1 OR a.CarID IN ({ORPHAN_CARS})");
-    preview(conn, &cars, &appointments, client_id)
+    let messages = format!("m.ClientID = ?1 OR m.CarID IN ({ORPHAN_CARS})");
+    preview(conn, &cars, &appointments, &messages, client_id)
 }
 
 pub fn preview_delete_car(conn: &Connection, car_id: i64) -> Result<DeletePreview> {
     let cars = format!("SELECT {CAR_LABEL} FROM cars c WHERE c.CarID = ?1");
-    preview(conn, &cars, "a.CarID = ?1", car_id)
+    preview(conn, &cars, "a.CarID = ?1", "m.CarID = ?1", car_id)
 }
 
 pub fn delete_client(conn: &mut Connection, client_id: i64) -> Result<()> {
@@ -740,7 +765,7 @@ mod tests {
     }
 
     fn client(conn: &mut Connection, phone: &str, car_ids: Vec<i64>) -> i64 {
-        save_client(conn, ClientInput { client_id: None, phone: phone.into(), car_ids })
+        save_client(conn, ClientInput { client_id: None, sms_opt_out: false, phone: phone.into(), car_ids })
             .unwrap()
             .id
     }
@@ -799,7 +824,7 @@ mod tests {
         let mut conn = test_connection();
         client(&mut conn, "0722 123-456", vec![]);
         for duplicate in ["0722123456", "+40722123456", "0040 722 123 456"] {
-            let input = ClientInput { client_id: None, phone: duplicate.into(), car_ids: vec![] };
+            let input = ClientInput { client_id: None, sms_opt_out: false, phone: duplicate.into(), car_ids: vec![] };
             assert_eq!(save_client(&mut conn, input).err(), Some(code("phone_exists")));
         }
     }
@@ -808,7 +833,7 @@ mod tests {
     fn rejects_invalid_phone() {
         let mut conn = test_connection();
         for phone in ["", "abc", "12"] {
-            let input = ClientInput { client_id: None, phone: phone.into(), car_ids: vec![] };
+            let input = ClientInput { client_id: None, sms_opt_out: false, phone: phone.into(), car_ids: vec![] };
             assert_eq!(save_client(&mut conn, input).err(), Some(code("invalid_phone")));
         }
     }
@@ -832,7 +857,7 @@ mod tests {
         let id = client(&mut conn, "0722000000", vec![first]);
         save_client(
             &mut conn,
-            ClientInput { client_id: Some(id), phone: "0722000000".into(), car_ids: vec![second] },
+            ClientInput { client_id: Some(id), sms_opt_out: false, phone: "0722000000".into(), car_ids: vec![second] },
         )
         .unwrap();
         assert_eq!(scalar(&conn, "SELECT CarID FROM carsclients"), second);

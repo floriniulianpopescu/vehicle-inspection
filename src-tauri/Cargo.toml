@@ -22,7 +22,18 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "backup"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "form", "query", "charset", "http2"] }
+keyring = { version = "3.6", features = ["windows-native", "async-secret-service", "tokio", "crypto-rust"] }
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "macros"] }
+chacha20poly1305 = "0.11"
+argon2 = "0.6"
+sha2 = "0.11.1"
+base64 = "0.23.1"
+getrandom = "0.4.3"
+url = "2.5.8"
+rust_xlsxwriter = "0.102"
+tauri-plugin-dialog = "2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
@@ -32,3 +43,6 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

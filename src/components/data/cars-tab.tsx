@@ -27,7 +27,7 @@ import { useI18n } from "@/lib/i18n";
 
 const STATES: RevisionState[] = ["overdue", "soon", "ok", "unknown"];
 
-const STATE_VARIANT = {
+export const STATE_VARIANT = {
   overdue: "destructive",
   soon: "default",
   ok: "secondary",

@@ -57,7 +57,12 @@ export function ClientsTab({
           {list.rows.length === 0 && <EmptyRow columns={3} />}
           {list.rows.map((client) => (
             <TableRow key={client.clientId}>
-              <TableCell>{client.phone}</TableCell>
+              <TableCell>
+                <div className="flex items-center gap-2">
+                  {client.phone}
+                  {client.smsOptOut && <Badge variant="outline">{t.data.noSms}</Badge>}
+                </div>
+              </TableCell>
               <TableCell>
                 <div className="flex flex-wrap gap-1">
                   {client.cars.map((car) => (

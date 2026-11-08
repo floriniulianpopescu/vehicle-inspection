@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "next-themes";
+import { BackupCard } from "@/components/backup/backup-card";
+import { GatewayCard } from "@/components/sms/gateway-card";
 import { CalendarSettingsCard } from "@/components/calendar-settings-card";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -72,6 +74,10 @@ export function SettingsPage() {
       </Card>
 
       <CalendarSettingsCard />
+
+      <BackupCard />
+
+      <GatewayCard />
 
       <Card>
         <CardHeader>
