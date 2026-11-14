@@ -13,6 +13,7 @@ import {
 } from "@/components/dashboard/charts";
 import { FREQUENCIES } from "@/components/data/car-dialog";
 import { FormError } from "@/components/data/field";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { DateRangePicker } from "@/components/date-range-picker";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -191,31 +192,42 @@ function ChartCard({
       {/* While new numbers load, the previous chart stays, dimmed. */}
       <CardContent className={loading ? "opacity-60 transition-opacity" : "transition-opacity"}>
         <FormError message={error} />
-        {empty ? (
-          <p className="py-16 text-center text-sm text-muted-foreground">{text.empty}</p>
-        ) : config.chart === "columns" ? (
-          <ColumnChart data={data} label={title} format={format} />
-        ) : config.chart === "line" ? (
-          <LineChart data={data} label={title} format={format} />
-        ) : config.chart === "stacked" ? (
-          <StackedColumnChart data={stacks} partNames={partNames} label={title} format={format} totalLabel={text.total} />
-        ) : config.chart === "table" && series?.parts ? (
-          <SplitTable data={stacks} partNames={partNames} format={format} keyTitle={text.period} totalLabel={text.total} />
-        ) : config.chart === "pie" ? (
-          <PieChart
-            slices={pieSlices(series?.points ?? []).map((slice) => ({
-              ...slice,
-              label: pointLabel(t, locale, config.metric, null, slice),
-            }))}
-            label={title}
-            format={format}
-            percent={(share) => percent.format(share)}
-          />
-        ) : config.chart === "bars" ? (
-          <BarList data={data} format={format} />
-        ) : (
-          <DataTable data={data} format={format} keyTitle={text.category} valueTitle={text.count} />
-        )}
+        <ErrorBoundary
+          key={`${config.metric}|${config.chart}|${config.grouping}`}
+          fallback={(failure) => (
+            <p className="py-16 text-center text-sm text-destructive">
+              {text.chartFailed} ({failure.message})
+            </p>
+          )}
+        >
+          {series === null ? (
+            <div className="h-[220px]" aria-busy />
+          ) : empty ? (
+            <p className="py-16 text-center text-sm text-muted-foreground">{text.empty}</p>
+          ) : config.chart === "columns" ? (
+            <ColumnChart data={data} label={title} format={format} />
+          ) : config.chart === "line" ? (
+            <LineChart data={data} label={title} format={format} />
+          ) : config.chart === "stacked" ? (
+            <StackedColumnChart data={stacks} partNames={partNames} label={title} format={format} totalLabel={text.total} />
+          ) : config.chart === "table" && series?.parts ? (
+            <SplitTable data={stacks} partNames={partNames} format={format} keyTitle={text.period} totalLabel={text.total} />
+          ) : config.chart === "pie" ? (
+            <PieChart
+              slices={pieSlices(series?.points ?? []).map((slice) => ({
+                ...slice,
+                label: pointLabel(t, locale, config.metric, null, slice),
+              }))}
+              label={title}
+              format={format}
+              percent={(share) => percent.format(share)}
+            />
+          ) : config.chart === "bars" ? (
+            <BarList data={data} format={format} />
+          ) : (
+            <DataTable data={data} format={format} keyTitle={text.category} valueTitle={text.count} />
+          )}
+        </ErrorBoundary>
       </CardContent>
     </Card>
   );

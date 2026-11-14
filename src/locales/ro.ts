@@ -1,5 +1,7 @@
 export const ro = {
   appName: "Inspecție Auto",
+  pageFailed: "Această pagină nu a putut fi afișată.",
+  retry: "Încearcă din nou",
   nav: {
     data: "Date",
     reports: "Rapoarte",
@@ -236,6 +238,7 @@ export const ro = {
     count: "Număr",
     other: "Altele",
     empty: "Nu există date pentru filtrele alese.",
+    chartFailed: "Graficul nu a putut fi afișat",
     notPeriod: "Arată situația de azi; perioada nu se aplică.",
     visitsFourPlus: "4 sau mai multe",
     total: "Total",

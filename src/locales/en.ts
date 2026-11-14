@@ -2,6 +2,8 @@ import type { Messages } from "./ro";
 
 export const en: Messages = {
   appName: "Vehicle Inspection",
+  pageFailed: "This page could not be shown.",
+  retry: "Try again",
   nav: {
     data: "Data",
     reports: "Reports",
@@ -236,6 +238,7 @@ export const en: Messages = {
     count: "Count",
     other: "Other",
     empty: "No data for the chosen filters.",
+    chartFailed: "The chart could not be shown",
     notPeriod: "Shows today's situation; the period does not apply.",
     visitsFourPlus: "4 or more",
     total: "Total",

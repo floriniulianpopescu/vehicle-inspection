@@ -92,11 +92,22 @@ function CategoryLabels({ data, center, width }: { data: Datum[]; center: (index
   );
 }
 
-function Frame({ label, children, overlay }: { label: string; children: (width: number) => ReactNode; overlay?: ReactNode }) {
+function Frame({
+  label,
+  children,
+  overlay,
+  hasData,
+}: {
+  label: string;
+  children: (width: number) => ReactNode;
+  overlay?: ReactNode;
+  hasData: boolean;
+}) {
   const { ref, width } = useWidth();
   return (
     <div ref={ref} className="relative w-full" style={{ height: HEIGHT }}>
-      {width > 0 && (
+      {/* Nothing to draw until the width and at least one point are known. */}
+      {width > 0 && hasData && (
         <svg width={width} height={HEIGHT} role="img" aria-label={label}>
           {children(width)}
         </svg>
@@ -151,6 +162,7 @@ export function StackedColumnChart({
       </div>
       <Frame
         label={label}
+        hasData={data.length > 0}
         overlay={
           activeDatum &&
           tip && (
@@ -289,7 +301,8 @@ export function ColumnChart({ data, label, format }: { data: Datum[]; label: str
   return (
     <Frame
       label={label}
-      overlay={active !== null && tip && <Tooltip x={tip.x} y={tip.y} datum={data[active]} format={format} />}
+      hasData={data.length > 0}
+      overlay={active !== null && tip && data[active] && <Tooltip x={tip.x} y={tip.y} datum={data[active]} format={format} />}
     >
       {(width) => {
         const plot = width - MARGIN.left - MARGIN.right;
@@ -352,7 +365,8 @@ export function LineChart({ data, label, format }: { data: Datum[]; label: strin
   return (
     <Frame
       label={label}
-      overlay={active !== null && tip && <Tooltip x={tip.x} y={tip.y} datum={data[active]} format={format} />}
+      hasData={data.length > 0}
+      overlay={active !== null && tip && data[active] && <Tooltip x={tip.x} y={tip.y} datum={data[active]} format={format} />}
     >
       {(width) => {
         const plot = width - MARGIN.left - MARGIN.right;

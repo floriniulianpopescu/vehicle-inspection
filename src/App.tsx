@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { Loader2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { AppNav, type Page } from "@/components/app-nav";
+import { ErrorBoundary } from "@/components/error-boundary";
+import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { AboutPage } from "@/pages/about-page";
@@ -40,19 +42,32 @@ export default function App() {
     <div className="aero-backdrop flex h-screen flex-col text-foreground">
       <AppNav page={page} onNavigate={setPage} />
       <main className="min-h-0 flex-1 overflow-auto">
-        {page === "data" ? (
-          <DataPage />
-        ) : page === "reports" ? (
-          <ReportsPage />
-        ) : page === "dashboard" ? (
-          <DashboardPage />
-        ) : page === "settings" ? (
-          <SettingsPage />
-        ) : page === "about" ? (
-          <AboutPage />
-        ) : (
-          <AutoSmsPage />
-        )}
+        <ErrorBoundary
+          key={page}
+          fallback={(error, retry) => (
+            <div className="mx-auto flex max-w-xl flex-col items-start gap-3 p-6">
+              <p className="font-medium">{t.pageFailed}</p>
+              <p className="text-sm break-all text-muted-foreground">{error.message}</p>
+              <Button variant="outline" onClick={retry}>
+                {t.retry}
+              </Button>
+            </div>
+          )}
+        >
+          {page === "data" ? (
+            <DataPage />
+          ) : page === "reports" ? (
+            <ReportsPage />
+          ) : page === "dashboard" ? (
+            <DashboardPage />
+          ) : page === "settings" ? (
+            <SettingsPage />
+          ) : page === "about" ? (
+            <AboutPage />
+          ) : (
+            <AutoSmsPage />
+          )}
+        </ErrorBoundary>
       </main>
       {closing && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-2 bg-background/90">
