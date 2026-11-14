@@ -9,33 +9,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { api, errorMessage, type Appointment, type DeletePreview } from "@/lib/api";
-import { displayDateTime } from "@/lib/format";
+import { errorMessage, type DeletePreview } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-
-export function DeleteAppointmentDialog({
-  appointment,
-  onClose,
-  onDeleted,
-}: {
-  appointment: Appointment;
-  onClose: () => void;
-  onDeleted: () => void;
-}) {
-  const { t } = useI18n();
-  return (
-    <DeleteDialog
-      title={t.data.deleteAppointment}
-      loadPreview={async () => ({
-        cars: [], messages: 0,
-        appointments: [{ timeDate: appointment.timeDate, plate: appointment.carLabel }],
-      })}
-      onConfirm={() => api.deleteAppointment(appointment.appointmentId)}
-      onClose={onClose}
-      onDeleted={onDeleted}
-    />
-  );
-}
 
 /** Lists everything a delete will remove and asks for confirmation. */
 export function DeleteDialog({
@@ -71,7 +46,7 @@ export function DeleteDialog({
     }
   }
 
-  const nothingListed = preview && !preview.cars.length && !preview.appointments.length && !preview.messages;
+  const nothingListed = preview && !preview.cars.length && !preview.inspections && !preview.messages;
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -96,18 +71,11 @@ export function DeleteDialog({
                 </ul>
               </section>
             )}
-            {preview.appointments.length > 0 && (
+            {preview.inspections > 0 && (
               <section>
                 <h3 className="font-medium">
-                  {t.data.appointments} ({preview.appointments.length})
+                  {t.data.inspections} ({preview.inspections})
                 </h3>
-                <ul>
-                  {preview.appointments.map((item, index) => (
-                    <li key={index}>
-                      {displayDateTime(item.timeDate)} · {item.plate}
-                    </li>
-                  ))}
-                </ul>
               </section>
             )}
             {preview.messages > 0 && (

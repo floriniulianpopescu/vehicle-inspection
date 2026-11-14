@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 pub(crate) const PAGE_SIZE: i64 = 50;
 const OPTION_LIMIT: i64 = 50;
 const DUE_SOON_DAYS: i64 = 30;
-const MAX_DURATION_MINUTES: i64 = 24 * 60;
 
 const CAR_LABEL: &str = "c.Plate || ' · ' || c.Manufacturer || ' ' || c.Model";
 
@@ -92,20 +91,9 @@ pub struct Car {
     revision_frequency: i64,
     next_revision: Option<String>,
     revision_state: String,
+    /// The client who brought the car to its last inspection, when known.
+    inspected_by: Option<i64>,
     clients: Vec<PickerOption>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Appointment {
-    appointment_id: i64,
-    client_id: i64,
-    car_id: i64,
-    time_date: String,
-    is_done: bool,
-    duration: i64,
-    phone: String,
-    car_label: String,
 }
 
 #[derive(Deserialize)]
@@ -121,16 +109,14 @@ pub struct CarFilter {
     search: String,
     frequency: Option<i64>,
     revision_state: Option<String>,
-    page: i64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppointmentFilter {
-    search: String,
-    is_done: Option<bool>,
-    from: Option<String>,
-    to: Option<String>,
+    /// Last inspection between these days, both included.
+    #[serde(default)]
+    revision_from: Option<String>,
+    #[serde(default)]
+    revision_to: Option<String>,
+    /// "newest" or "oldest" last inspection first; by plate otherwise.
+    #[serde(default)]
+    sort: Option<String>,
     page: i64,
 }
 
@@ -153,48 +139,23 @@ pub struct CarInput {
     last_revision: Option<String>,
     revision_frequency: i64,
     client_ids: Vec<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppointmentInput {
-    appointment_id: Option<i64>,
-    client_id: i64,
-    car_id: i64,
-    time_date: String,
-    is_done: bool,
-    duration: i64,
-}
-
-/// Sent back when an appointment stops being done, so the user can correct
-/// the car's LastRevision.
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RevisionPrompt {
-    car_id: i64,
-    plate: String,
-    last_revision: Option<String>,
-    suggested: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveAppointmentResult {
-    revision_prompt: Option<RevisionPrompt>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeleteAppointmentItem {
-    time_date: String,
-    plate: String,
+    /// Who brought the car to the inspection on `last_revision`.
+    #[serde(default)]
+    inspected_by: Option<i64>,
+    /// Phones typed in the car form that are not clients yet. Each becomes a client linked
+    /// to the car, or the existing client when the number is already known.
+    #[serde(default)]
+    new_phones: Vec<String>,
+    /// Set instead of `inspected_by` when the car was brought by one of `new_phones`.
+    #[serde(default)]
+    inspected_by_phone: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeletePreview {
     cars: Vec<String>,
-    appointments: Vec<DeleteAppointmentItem>,
+    inspections: i64,
     messages: i64,
 }
 
@@ -406,12 +367,26 @@ pub fn list_cars(conn: &Connection, input: CarFilter) -> Result<Page<Car>> {
     if let Some(revision_state) = input.revision_state {
         filter.add(format!("{state} = ?"), revision_state);
     }
+    if let Some(from) = input.revision_from {
+        filter.add("c.LastRevision >= ?".into(), from);
+    }
+    if let Some(to) = input.revision_to {
+        filter.add("c.LastRevision <= ?".into(), to);
+    }
+    // Cars with no known date always come last.
+    let order = match input.sort.as_deref() {
+        Some("newest") => "c.LastRevision IS NULL, c.LastRevision DESC, c.Plate",
+        Some("oldest") => "c.LastRevision IS NULL, c.LastRevision ASC, c.Plate",
+        _ => "c.Plate",
+    };
 
     let select = format!(
         "SELECT c.CarID, c.Plate, c.Manufacturer, c.Model, c.LastRevision, c.RevisionFrequency,
-                {NEXT_REVISION}, {state} FROM cars c"
+                {NEXT_REVISION}, {state},
+                (SELECT i.ClientID FROM inspections i WHERE i.CarID = c.CarID AND i.Date = c.LastRevision)
+         FROM cars c"
     );
-    let mut rows = filter.rows(conn, &select, "c.Plate", input.page, |r| {
+    let mut rows = filter.rows(conn, &select, order, input.page, |r| {
         Ok(Car {
             car_id: r.get(0)?,
             plate: r.get(1)?,
@@ -421,6 +396,7 @@ pub fn list_cars(conn: &Connection, input: CarFilter) -> Result<Page<Car>> {
             revision_frequency: r.get(5)?,
             next_revision: r.get(6)?,
             revision_state: r.get(7)?,
+            inspected_by: r.get(8)?,
             clients: Vec::new(),
         })
     })?;
@@ -428,61 +404,6 @@ pub fn list_cars(conn: &Connection, input: CarFilter) -> Result<Page<Car>> {
         car.clients = linked_clients(conn, car.car_id)?;
     }
     Ok(Page { rows, total: filter.total(conn, "cars c")? })
-}
-
-const APPOINTMENT_FROM: &str = "appointments a
-    JOIN clients cl ON cl.ClientID = a.ClientID
-    JOIN cars c ON c.CarID = a.CarID";
-
-fn appointment_select() -> String {
-    format!(
-        "SELECT a.AppointmentID, a.ClientID, a.CarID, a.TimeDate, a.IsDone, a.Duration,
-                cl.Phone, {CAR_LABEL} FROM {APPOINTMENT_FROM}"
-    )
-}
-
-fn appointment_from_row(r: &Row) -> rusqlite::Result<Appointment> {
-    Ok(Appointment {
-        appointment_id: r.get(0)?,
-        client_id: r.get(1)?,
-        car_id: r.get(2)?,
-        time_date: r.get(3)?,
-        is_done: r.get(4)?,
-        duration: r.get(5)?,
-        phone: r.get(6)?,
-        car_label: r.get(7)?,
-    })
-}
-
-/// Every appointment starting on a day from `from` to `to`, both included.
-pub fn appointments_between(conn: &Connection, from: &str, to: &str) -> Result<Vec<Appointment>> {
-    let sql = format!(
-        "{} WHERE substr(a.TimeDate, 1, 10) BETWEEN ?1 AND ?2 ORDER BY a.TimeDate",
-        appointment_select()
-    );
-    let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map(params![from, to], appointment_from_row)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
-pub fn list_appointments(conn: &Connection, input: AppointmentFilter) -> Result<Page<Appointment>> {
-    let mut filter = Filter::default();
-    filter.search(
-        &input.search,
-        &[like("cl.Phone"), like("c.Plate"), like("c.Manufacturer"), like("c.Model")],
-    );
-    if let Some(is_done) = input.is_done {
-        filter.add("a.IsDone = ?".into(), is_done);
-    }
-    if let Some(from) = input.from {
-        filter.add("substr(a.TimeDate, 1, 10) >= ?".into(), from);
-    }
-    if let Some(to) = input.to {
-        filter.add("substr(a.TimeDate, 1, 10) <= ?".into(), to);
-    }
-
-    let rows = filter.rows(conn, &appointment_select(), "a.TimeDate DESC", input.page, appointment_from_row)?;
-    Ok(Page { rows, total: filter.total(conn, APPOINTMENT_FROM)? })
 }
 
 /// Clients for a picker. Those linked to `car_id` come first.
@@ -564,16 +485,41 @@ pub fn save_client(conn: &mut Connection, input: ClientInput) -> Result<PickerOp
 pub fn save_car(conn: &mut Connection, input: CarInput) -> Result<PickerOption> {
     let plate = normalize_plate(&input.plate)?;
     let manufacturer = input.manufacturer.trim();
-    let model = input.model.trim();
-    if manufacturer.is_empty() || model.is_empty() {
+    // The model is optional; an unknown one is stored as "-".
+    let model = match input.model.trim() {
+        "" => "-",
+        model => model,
+    };
+    if manufacturer.is_empty() {
         return Err(AppError::code("required_fields"));
     }
     if ![6, 12, 24].contains(&input.revision_frequency) {
         return Err(AppError::code("required_fields"));
     }
     validate_last_revision(conn, input.last_revision.as_deref())?;
+    let new_phones = input
+        .new_phones
+        .iter()
+        .map(|phone| normalize_phone(phone))
+        .collect::<Result<Vec<_>>>()?;
+    let inspected_by_phone = input.inspected_by_phone.as_deref().map(normalize_phone).transpose()?;
 
     let tx = conn.transaction()?;
+    let mut client_ids = input.client_ids.clone();
+    for phone in &new_phones {
+        client_ids.push(client_by_phone(&tx, phone)?);
+    }
+    let inspected_by = match &inspected_by_phone {
+        Some(phone) => Some(client_by_phone(&tx, phone)?),
+        None => input.inspected_by,
+    };
+    let previous: Option<String> = match input.car_id {
+        Some(id) => tx
+            .query_row("SELECT LastRevision FROM cars WHERE CarID = ?1", [id], |r| r.get(0))
+            .optional()?
+            .ok_or_else(|| AppError::code("not_found"))?,
+        None => None,
+    };
     let car_id = match input.car_id {
         Some(id) => {
             let changed = tx
@@ -597,12 +543,19 @@ pub fn save_car(conn: &mut Connection, input: CarInput) -> Result<PickerOption> 
         }
     };
     tx.execute("DELETE FROM carsclients WHERE CarID = ?1", [car_id])?;
-    for client_id in input.client_ids {
+    for client_id in client_ids.iter().chain(&inspected_by) {
         tx.execute(
             "INSERT OR IGNORE INTO carsclients (CarID, ClientID) VALUES (?1, ?2)",
             params![car_id, client_id],
         )?;
     }
+    record_inspection(
+        &tx,
+        car_id,
+        previous.as_deref(),
+        input.last_revision.as_deref(),
+        inspected_by,
+    )?;
     tx.commit()?;
     Ok(PickerOption {
         id: car_id,
@@ -611,99 +564,44 @@ pub fn save_car(conn: &mut Connection, input: CarInput) -> Result<PickerOption> 
     })
 }
 
-pub fn save_appointment(conn: &mut Connection, input: AppointmentInput) -> Result<SaveAppointmentResult> {
-    if !has_format(conn, "%Y-%m-%dT%H:%M", &input.time_date)? {
-        return Err(AppError::code("invalid_date"));
-    }
-    if !(1..=MAX_DURATION_MINUTES).contains(&input.duration) {
-        return Err(AppError::code("invalid_duration"));
-    }
-    let date = &input.time_date[..10];
-    if input.is_done && is_future_date(conn, date)? {
-        return Err(AppError::code("done_in_future"));
-    }
+/// The client with this (normalized) phone, created if there is none.
+fn client_by_phone(conn: &Connection, phone: &str) -> Result<i64> {
+    conn.execute("INSERT OR IGNORE INTO clients (Phone) VALUES (?1)", [phone])?;
+    Ok(conn.query_row("SELECT ClientID FROM clients WHERE Phone = ?1", [phone], |r| r.get(0))?)
+}
 
-    let tx = conn.transaction()?;
-    let previous: Option<(bool, i64)> = match input.appointment_id {
-        Some(id) => Some(
-            tx.query_row(
-                "SELECT IsDone, CarID FROM appointments WHERE AppointmentID = ?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or_else(|| AppError::code("not_found"))?,
-        ),
-        None => None,
-    };
-
-    match input.appointment_id {
-        Some(id) => {
-            tx.execute(
-                "UPDATE appointments SET ClientID = ?1, CarID = ?2, TimeDate = ?3, IsDone = ?4,
-                 Duration = ?5 WHERE AppointmentID = ?6",
-                params![input.client_id, input.car_id, input.time_date, input.is_done, input.duration, id],
-            )?;
-        }
-        None => {
-            tx.execute(
-                "INSERT INTO appointments (ClientID, CarID, TimeDate, IsDone, Duration)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![input.client_id, input.car_id, input.time_date, input.is_done, input.duration],
-            )?;
-        }
-    }
-
-    tx.execute(
-        "INSERT OR IGNORE INTO carsclients (CarID, ClientID) VALUES (?1, ?2)",
-        params![input.car_id, input.client_id],
-    )?;
-    if input.is_done {
-        tx.execute(
-            "UPDATE cars SET LastRevision = ?1
-             WHERE CarID = ?2 AND (LastRevision IS NULL OR LastRevision < ?1)",
-            params![date, input.car_id],
+/// Keeps the visit history in step with the car's last inspection date. A later date is a
+/// new visit. The same date only updates who brought the car. An earlier or cleared date
+/// corrects the latest visit instead of adding one.
+fn record_inspection(
+    conn: &Connection,
+    car_id: i64,
+    previous: Option<&str>,
+    current: Option<&str>,
+    client_id: Option<i64>,
+) -> Result<()> {
+    if let Some(previous) = previous
+        && current.is_none_or(|current| current < previous)
+    {
+        conn.execute(
+            "DELETE FROM inspections WHERE CarID = ?1 AND Date = ?2",
+            params![car_id, previous],
         )?;
     }
-
-    let revision_prompt = match previous {
-        Some((true, car_id)) if !input.is_done => Some(revision_prompt(&tx, car_id)?),
-        _ => None,
-    };
-    tx.commit()?;
-    Ok(SaveAppointmentResult { revision_prompt })
-}
-
-fn revision_prompt(conn: &Connection, car_id: i64) -> Result<RevisionPrompt> {
-    Ok(conn.query_row(
-        "SELECT c.Plate, c.LastRevision,
-                (SELECT MAX(substr(a.TimeDate, 1, 10)) FROM appointments a
-                 WHERE a.CarID = c.CarID AND a.IsDone = 1)
-         FROM cars c WHERE c.CarID = ?1",
-        [car_id],
-        |r| {
-            Ok(RevisionPrompt {
-                car_id,
-                plate: r.get(0)?,
-                last_revision: r.get(1)?,
-                suggested: r.get(2)?,
-            })
-        },
-    )?)
-}
-
-pub fn set_last_revision(conn: &Connection, car_id: i64, value: Option<String>) -> Result<()> {
-    validate_last_revision(conn, value.as_deref())?;
-    require_changed(conn.execute(
-        "UPDATE cars SET LastRevision = ?1 WHERE CarID = ?2",
-        params![value, car_id],
-    )?)
+    if let Some(current) = current {
+        conn.execute(
+            "INSERT INTO inspections (CarID, ClientID, Date) VALUES (?1, ?2, ?3)
+             ON CONFLICT (CarID, Date) DO UPDATE SET ClientID = excluded.ClientID",
+            params![car_id, client_id, current],
+        )?;
+    }
+    Ok(())
 }
 
 fn preview(
     conn: &Connection,
     cars_sql: &str,
-    appointments_where: &str,
+    inspections_where: &str,
     messages_where: &str,
     id: i64,
 ) -> Result<DeletePreview> {
@@ -711,32 +609,27 @@ fn preview(
     let cars = statement
         .query_map([id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-
-    let mut statement = conn.prepare(&format!(
-        "SELECT a.TimeDate, c.Plate FROM appointments a JOIN cars c ON c.CarID = a.CarID
-         WHERE {appointments_where} ORDER BY a.TimeDate DESC"
-    ))?;
-    let appointments = statement
-        .query_map([id], |r| Ok(DeleteAppointmentItem { time_date: r.get(0)?, plate: r.get(1)? }))?
-        .collect::<rusqlite::Result<_>>()?;
-    let messages = conn.query_row(
-        &format!("SELECT COUNT(*) FROM messages m WHERE {messages_where}"),
-        [id],
-        |r| r.get(0),
-    )?;
-    Ok(DeletePreview { cars, appointments, messages })
+    let count = |table: &str, condition: &str| -> Result<i64> {
+        Ok(conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE {condition}"), [id], |r| r.get(0))?)
+    };
+    Ok(DeletePreview {
+        cars,
+        inspections: count("inspections i", inspections_where)?,
+        messages: count("messages m", messages_where)?,
+    })
 }
 
 pub fn preview_delete_client(conn: &Connection, client_id: i64) -> Result<DeletePreview> {
     let cars = format!("SELECT {CAR_LABEL} FROM cars c WHERE c.CarID IN ({ORPHAN_CARS}) ORDER BY c.Plate");
-    let appointments = format!("a.ClientID = ?1 OR a.CarID IN ({ORPHAN_CARS})");
+    // The client's visits with cars that stay are kept, without the client.
+    let inspections = format!("i.CarID IN ({ORPHAN_CARS})");
     let messages = format!("m.ClientID = ?1 OR m.CarID IN ({ORPHAN_CARS})");
-    preview(conn, &cars, &appointments, &messages, client_id)
+    preview(conn, &cars, &inspections, &messages, client_id)
 }
 
 pub fn preview_delete_car(conn: &Connection, car_id: i64) -> Result<DeletePreview> {
     let cars = format!("SELECT {CAR_LABEL} FROM cars c WHERE c.CarID = ?1");
-    preview(conn, &cars, "a.CarID = ?1", "m.CarID = ?1", car_id)
+    preview(conn, &cars, "i.CarID = ?1", "m.CarID = ?1", car_id)
 }
 
 pub fn delete_client(conn: &mut Connection, client_id: i64) -> Result<()> {
@@ -749,10 +642,6 @@ pub fn delete_client(conn: &mut Connection, client_id: i64) -> Result<()> {
 
 pub fn delete_car(conn: &Connection, car_id: i64) -> Result<()> {
     require_changed(conn.execute("DELETE FROM cars WHERE CarID = ?1", [car_id])?)
-}
-
-pub fn delete_appointment(conn: &Connection, appointment_id: i64) -> Result<()> {
-    require_changed(conn.execute("DELETE FROM appointments WHERE AppointmentID = ?1", [appointment_id])?)
 }
 
 #[cfg(test)]
@@ -779,6 +668,9 @@ mod tests {
             last_revision: last_revision.map(str::to_string),
             revision_frequency: months,
             client_ids: vec![],
+            inspected_by: None,
+            new_phones: vec![],
+            inspected_by_phone: None,
         }
     }
 
@@ -786,37 +678,98 @@ mod tests {
         save_car(conn, car_input(plate, None, 12)).unwrap().id
     }
 
-    fn appointment(client_id: i64, car_id: i64, time_date: &str, is_done: bool) -> AppointmentInput {
-        AppointmentInput {
-            appointment_id: None,
-            client_id,
-            car_id,
-            time_date: time_date.into(),
-            is_done,
-            duration: 30,
-        }
-    }
-
     fn scalar(conn: &Connection, sql: &str) -> i64 {
         conn.query_row(sql, [], |r| r.get(0)).unwrap()
     }
 
-    fn last_revision(conn: &Connection, car_id: i64) -> Option<String> {
-        conn.query_row("SELECT LastRevision FROM cars WHERE CarID = ?1", [car_id], |r| r.get(0))
-            .unwrap()
+    fn car_filter(search: &str) -> CarFilter {
+        CarFilter {
+            search: search.into(),
+            frequency: None,
+            revision_state: None,
+            revision_from: None,
+            revision_to: None,
+            sort: None,
+            page: 0,
+        }
     }
 
     fn cars_page(conn: &Connection, search: &str, state: Option<&str>) -> Page<Car> {
-        list_cars(
-            conn,
-            CarFilter {
-                search: search.into(),
-                frequency: None,
-                revision_state: state.map(str::to_string),
-                page: 0,
-            },
-        )
-        .unwrap()
+        list_cars(conn, CarFilter { revision_state: state.map(str::to_string), ..car_filter(search) })
+            .unwrap()
+    }
+
+    fn plates(page: Page<Car>) -> Vec<String> {
+        page.rows.into_iter().map(|car| car.plate).collect()
+    }
+
+    #[test]
+    fn cars_sort_by_last_inspection_with_unknown_dates_last() {
+        let mut conn = test_connection();
+        save_car(&mut conn, car_input("B1AAA", Some("2024-05-01"), 12)).unwrap();
+        save_car(&mut conn, car_input("B2AAA", None, 12)).unwrap();
+        save_car(&mut conn, car_input("B3AAA", Some("2025-05-01"), 12)).unwrap();
+        let sorted = |sort: &str| {
+            plates(list_cars(&conn, CarFilter { sort: Some(sort.into()), ..car_filter("") }).unwrap())
+        };
+        assert_eq!(sorted("newest"), ["B3AAA", "B1AAA", "B2AAA"]);
+        assert_eq!(sorted("oldest"), ["B1AAA", "B3AAA", "B2AAA"]);
+    }
+
+    #[test]
+    fn cars_filter_by_last_inspection_range() {
+        let mut conn = test_connection();
+        for (plate, date) in [("B1AAA", "2025-04-30"), ("B2AAA", "2025-05-01"), ("B3AAA", "2025-05-31"), ("B4AAA", "2025-06-01")] {
+            save_car(&mut conn, car_input(plate, Some(date), 12)).unwrap();
+        }
+        let filter = CarFilter {
+            revision_from: Some("2025-05-01".into()),
+            revision_to: Some("2025-05-31".into()),
+            ..car_filter("")
+        };
+        assert_eq!(plates(list_cars(&conn, filter).unwrap()), ["B2AAA", "B3AAA"]);
+    }
+
+    #[test]
+    fn typed_phones_become_clients_linked_to_the_car() {
+        let mut conn = test_connection();
+        let known = client(&mut conn, "0722000001", vec![]);
+        let mut input = car_input("B1AAA", Some("2024-05-01"), 12);
+        // One new number, and a known one written differently.
+        input.new_phones = vec!["0733 000 002".into(), "+40722000001".into()];
+        input.inspected_by_phone = Some("0733000002".into());
+        let car_id = save_car(&mut conn, input).unwrap().id;
+
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM clients"), 2);
+        let new: i64 = conn
+            .query_row("SELECT ClientID FROM clients WHERE Phone = '0733000002'", [], |r| r.get(0))
+            .unwrap();
+        let mut linked: Vec<i64> = cars_page(&conn, "", None).rows[0].clients.iter().map(|c| c.id).collect();
+        linked.sort();
+        assert_eq!(linked, [known, new]);
+        assert_eq!(visits(&conn, car_id), [visit("2024-05-01", Some(new))]);
+    }
+
+    #[test]
+    fn an_empty_model_is_saved_as_a_dash() {
+        let mut conn = test_connection();
+        let mut input = car_input("B1AAA", None, 12);
+        input.model = "  ".into();
+        assert_eq!(save_car(&mut conn, input).unwrap().label, "B1AAA · Dacia -");
+        assert_eq!(cars_page(&conn, "", None).rows[0].model, "-");
+
+        let mut input = car_input("B2AAA", None, 12);
+        input.manufacturer = " ".into();
+        assert_eq!(save_car(&mut conn, input).err(), Some(code("required_fields")));
+    }
+
+    #[test]
+    fn a_bad_typed_phone_saves_nothing() {
+        let mut conn = test_connection();
+        let mut input = car_input("B1AAA", None, 12);
+        input.new_phones = vec!["12".into()];
+        assert_eq!(save_car(&mut conn, input).err(), Some(code("invalid_phone")));
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM cars"), 0);
     }
 
     #[test]
@@ -892,76 +845,89 @@ mod tests {
         assert_eq!(cars_page(&conn, "", Some("unknown")).rows[0].plate, "B2AAA");
     }
 
-    #[test]
-    fn appointment_links_client_and_car() {
-        let mut conn = test_connection();
-        let car_id = car(&mut conn, "B1AAA");
-        let client_id = client(&mut conn, "0722000000", vec![]);
-        save_appointment(&mut conn, appointment(client_id, car_id, "2030-01-10T09:30", false)).unwrap();
-        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM carsclients"), 1);
+    fn visits(conn: &Connection, car_id: i64) -> Vec<(String, Option<i64>)> {
+        let mut query = conn
+            .prepare("SELECT Date, ClientID FROM inspections WHERE CarID = ?1 ORDER BY Date")
+            .unwrap();
+        query
+            .query_map([car_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn inspected(conn: &mut Connection, car_id: i64, date: Option<&str>, by: Option<i64>) {
+        let mut input = car_input("B1AAA", date, 12);
+        input.car_id = Some(car_id);
+        input.inspected_by = by;
+        save_car(conn, input).unwrap();
+    }
+
+    fn visit(date: &str, client: Option<i64>) -> (String, Option<i64>) {
+        (date.to_string(), client)
     }
 
     #[test]
-    fn appointment_needs_existing_records_and_valid_values() {
+    fn a_later_inspection_date_adds_a_visit_with_its_client() {
         let mut conn = test_connection();
-        assert_eq!(
-            save_appointment(&mut conn, appointment(1, 1, "2030-01-10T09:30", false)).err(),
-            Some(code("not_found"))
-        );
         let car_id = car(&mut conn, "B1AAA");
-        let client_id = client(&mut conn, "0722000000", vec![]);
-        assert_eq!(
-            save_appointment(&mut conn, appointment(client_id, car_id, "2030-02-31T09:30", false)).err(),
-            Some(code("invalid_date"))
-        );
-        let mut zero = appointment(client_id, car_id, "2030-01-10T09:30", false);
-        zero.duration = 0;
-        assert_eq!(save_appointment(&mut conn, zero).err(), Some(code("invalid_duration")));
+        let first = client(&mut conn, "0722000001", vec![]);
+        let second = client(&mut conn, "0722000002", vec![]);
+
+        inspected(&mut conn, car_id, Some("2024-05-01"), Some(first));
+        inspected(&mut conn, car_id, Some("2025-05-01"), Some(second));
+
+        assert_eq!(visits(&conn, car_id), [visit("2024-05-01", Some(first)), visit("2025-05-01", Some(second))]);
+        assert_eq!(cars_page(&conn, "", None).rows[0].inspected_by, Some(second));
+        // Whoever brought the car is linked to it, even if left out of the list.
+        assert_eq!(scalar(&conn, "SELECT ClientID FROM carsclients"), second);
     }
 
     #[test]
-    fn cannot_mark_future_appointment_done() {
+    fn saving_the_same_date_only_changes_who_brought_the_car() {
         let mut conn = test_connection();
         let car_id = car(&mut conn, "B1AAA");
-        let client_id = client(&mut conn, "0722000000", vec![]);
-        assert_eq!(
-            save_appointment(&mut conn, appointment(client_id, car_id, "2999-01-10T09:30", true)).err(),
-            Some(code("done_in_future"))
-        );
-        assert_eq!(last_revision(&conn, car_id), None);
+        let first = client(&mut conn, "0722000001", vec![]);
+        let second = client(&mut conn, "0722000002", vec![]);
+
+        inspected(&mut conn, car_id, Some("2024-05-01"), Some(first));
+        inspected(&mut conn, car_id, Some("2024-05-01"), Some(second));
+
+        assert_eq!(visits(&conn, car_id), [visit("2024-05-01", Some(second))]);
     }
 
     #[test]
-    fn done_appointment_only_moves_last_revision_forward() {
+    fn an_earlier_or_cleared_date_corrects_the_latest_visit() {
         let mut conn = test_connection();
         let car_id = car(&mut conn, "B1AAA");
-        let client_id = client(&mut conn, "0722000000", vec![]);
-        save_appointment(&mut conn, appointment(client_id, car_id, "2024-05-01T09:30", true)).unwrap();
-        assert_eq!(last_revision(&conn, car_id).as_deref(), Some("2024-05-01"));
-        save_appointment(&mut conn, appointment(client_id, car_id, "2023-05-01T09:30", true)).unwrap();
-        assert_eq!(last_revision(&conn, car_id).as_deref(), Some("2024-05-01"));
+
+        inspected(&mut conn, car_id, Some("2024-05-01"), None);
+        inspected(&mut conn, car_id, Some("2025-05-10"), None);
+        inspected(&mut conn, car_id, Some("2025-05-01"), None);
+        assert_eq!(visits(&conn, car_id), [visit("2024-05-01", None), visit("2025-05-01", None)]);
+
+        inspected(&mut conn, car_id, None, None);
+        assert_eq!(visits(&conn, car_id), [visit("2024-05-01", None)]);
     }
 
     #[test]
-    fn unticking_done_offers_a_correction() {
+    fn a_new_car_with_a_date_starts_its_history() {
         let mut conn = test_connection();
-        let car_id = car(&mut conn, "B1AAA");
-        let client_id = client(&mut conn, "0722000000", vec![]);
-        save_appointment(&mut conn, appointment(client_id, car_id, "2023-05-01T09:30", true)).unwrap();
-        save_appointment(&mut conn, appointment(client_id, car_id, "2024-05-01T09:30", true)).unwrap();
+        let client_id = client(&mut conn, "0722000001", vec![]);
+        let mut input = car_input("B1AAA", Some("2024-05-01"), 12);
+        input.client_ids = vec![client_id];
+        input.inspected_by = Some(client_id);
+        let car_id = save_car(&mut conn, input).unwrap().id;
 
-        let mut untick = appointment(client_id, car_id, "2024-05-01T09:30", false);
-        untick.appointment_id = Some(2);
-        let result = save_appointment(&mut conn, untick).unwrap();
+        assert_eq!(visits(&conn, car_id), [visit("2024-05-01", Some(client_id))]);
+    }
 
+    #[test]
+    fn inspection_date_cannot_be_in_the_future() {
+        let mut conn = test_connection();
         assert_eq!(
-            result.revision_prompt,
-            Some(RevisionPrompt {
-                car_id,
-                plate: "B1AAA".into(),
-                last_revision: Some("2024-05-01".into()),
-                suggested: Some("2023-05-01".into()),
-            })
+            save_car(&mut conn, car_input("B1AAA", Some("2999-01-01"), 12)).err(),
+            Some(code("revision_in_future"))
         );
     }
 
@@ -972,20 +938,23 @@ mod tests {
         let shared = car(&mut conn, "B2AAA");
         let leaving = client(&mut conn, "0722000000", vec![own, shared]);
         let other = client(&mut conn, "0733000000", vec![shared]);
-        save_appointment(&mut conn, appointment(leaving, own, "2030-01-10T09:30", false)).unwrap();
-        save_appointment(&mut conn, appointment(leaving, shared, "2030-01-11T09:30", false)).unwrap();
-        save_appointment(&mut conn, appointment(other, shared, "2030-01-12T09:30", false)).unwrap();
+        inspected(&mut conn, own, Some("2024-05-01"), Some(leaving));
+        let mut shared_input = car_input("B2AAA", Some("2024-06-01"), 12);
+        shared_input.car_id = Some(shared);
+        shared_input.client_ids = vec![leaving, other];
+        shared_input.inspected_by = Some(leaving);
+        save_car(&mut conn, shared_input).unwrap();
 
         let preview = preview_delete_client(&conn, leaving).unwrap();
         assert_eq!(preview.cars, vec!["B1AAA · Dacia Logan".to_string()]);
-        assert_eq!(preview.appointments.len(), 2);
+        assert_eq!(preview.inspections, 1);
 
         delete_client(&mut conn, leaving).unwrap();
 
         assert_eq!(scalar(&conn, "SELECT CarID FROM cars"), shared);
         assert_eq!(scalar(&conn, "SELECT ClientID FROM clients"), other);
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM carsclients"), 1);
-        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM appointments"), 1);
+        assert_eq!(visits(&conn, shared), [visit("2024-06-01", None)]);
     }
 
     #[test]
@@ -993,12 +962,12 @@ mod tests {
         let mut conn = test_connection();
         let car_id = car(&mut conn, "B1AAA");
         let client_id = client(&mut conn, "0722000000", vec![car_id]);
-        save_appointment(&mut conn, appointment(client_id, car_id, "2030-01-10T09:30", false)).unwrap();
+        inspected(&mut conn, car_id, Some("2024-05-01"), Some(client_id));
 
-        assert_eq!(preview_delete_car(&conn, car_id).unwrap().appointments.len(), 1);
+        assert_eq!(preview_delete_car(&conn, car_id).unwrap().inspections, 1);
         delete_car(&conn, car_id).unwrap();
 
-        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM appointments"), 0);
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM inspections"), 0);
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM clients"), 1);
     }
 
@@ -1007,58 +976,6 @@ mod tests {
         let mut conn = test_connection();
         assert_eq!(delete_client(&mut conn, 99).err(), Some(code("not_found")));
         assert_eq!(delete_car(&conn, 99).err(), Some(code("not_found")));
-        assert_eq!(delete_appointment(&conn, 99).err(), Some(code("not_found")));
-    }
-
-    #[test]
-    fn appointment_filters_apply() {
-        let mut conn = test_connection();
-        let car_id = car(&mut conn, "B1AAA");
-        let client_id = client(&mut conn, "0722000000", vec![]);
-        save_appointment(&mut conn, appointment(client_id, car_id, "2024-05-01T09:30", true)).unwrap();
-        save_appointment(&mut conn, appointment(client_id, car_id, "2030-01-10T09:30", false)).unwrap();
-
-        let total = |is_done, from: Option<&str>, to: Option<&str>| {
-            list_appointments(
-                &conn,
-                AppointmentFilter {
-                    search: "b1aaa".into(),
-                    is_done,
-                    from: from.map(str::to_string),
-                    to: to.map(str::to_string),
-                    page: 0,
-                },
-            )
-            .unwrap()
-            .total
-        };
-        assert_eq!(total(None, None, None), 2);
-        assert_eq!(total(Some(true), None, None), 1);
-        assert_eq!(total(None, Some("2024-05-01"), Some("2024-05-01")), 1);
-    }
-
-    #[test]
-    fn appointments_between_includes_both_end_days_in_time_order() {
-        let mut conn = test_connection();
-        let car_id = car(&mut conn, "B1AAA");
-        let client_id = client(&mut conn, "0722000000", vec![]);
-        for time_date in [
-            "2030-01-13T23:30",
-            "2030-01-14T08:00",
-            "2030-01-20T23:30",
-            "2030-01-14T07:00",
-            "2030-01-21T00:00",
-        ] {
-            save_appointment(&mut conn, appointment(client_id, car_id, time_date, false)).unwrap();
-        }
-
-        let found: Vec<String> = appointments_between(&conn, "2030-01-14", "2030-01-20")
-            .unwrap()
-            .into_iter()
-            .map(|a| a.time_date)
-            .collect();
-
-        assert_eq!(found, ["2030-01-14T07:00", "2030-01-14T08:00", "2030-01-20T23:30"]);
     }
 
     #[test]

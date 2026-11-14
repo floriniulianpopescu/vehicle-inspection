@@ -4,12 +4,14 @@ mod data;
 mod db;
 mod reports;
 mod sms;
+mod whatsapp;
 
 use std::fs;
 
 use backup::BackupService;
 use db::Database;
 use sms::SmsService;
+use whatsapp::WhatsAppService;
 use tauri::{Manager, WindowEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -24,9 +26,18 @@ pub fn run() {
             app.manage(database);
             app.manage(BackupService::new(&data_dir));
             app.manage(SmsService::new(&data_dir));
+            app.manage(WhatsAppService::default());
             Ok(())
         })
         .on_window_event(|window, event| {
+            // The WhatsApp window closes on its own; only the main window ends the app.
+            if window.label() != "main" {
+                return;
+            }
+            if let WindowEvent::Destroyed = event {
+                window.app_handle().exit(0);
+                return;
+            }
             let WindowEvent::CloseRequested { api, .. } = event else { return };
             if !window.state::<BackupService>().begin_closing() {
                 return;
@@ -42,21 +53,22 @@ pub fn run() {
             commands::database_info,
             commands::list_clients,
             commands::list_cars,
-            commands::list_appointments,
-            commands::appointments_between,
             commands::client_options,
             commands::car_options,
             commands::save_client,
             commands::save_car,
-            commands::save_appointment,
-            commands::set_last_revision,
             commands::preview_delete_client,
             commands::preview_delete_car,
             commands::delete_client,
             commands::delete_car,
-            commands::delete_appointment,
             commands::report,
+            commands::sms_reminder_days,
+            commands::sms_set_reminder_days,
+            commands::sms_interval_seconds,
             commands::sms_pending,
+            commands::whatsapp_status,
+            commands::whatsapp_open,
+            commands::whatsapp_log_out,
             commands::sms_send,
             commands::sms_stop,
             commands::sms_progress,

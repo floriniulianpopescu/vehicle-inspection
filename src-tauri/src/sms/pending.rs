@@ -7,9 +7,14 @@ use crate::data::{self, AppError, Page};
 
 type Result<T> = std::result::Result<T, AppError>;
 
-const REMINDER_DAYS: i64 = 30;
+pub const DEFAULT_REMINDER_DAYS: i64 = 30;
+/// About six months.
+pub const MAX_REMINDER_DAYS: i64 = 180;
 const GREETING_LEAD_DAYS: i64 = 3;
 pub const KIND_INSPECTION: &str = "inspection";
+/// ITP reminders go out by SMS, greetings by WhatsApp.
+pub const CHANNEL_SMS: &str = "sms";
+pub const CHANNEL_WHATSAPP: &str = "whatsapp";
 const KINDS: [&str; 4] = [KIND_INSPECTION, "christmas", "new_year", "easter"];
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -17,6 +22,7 @@ const KINDS: [&str; 4] = [KIND_INSPECTION, "christmas", "new_year", "easter"];
 pub struct PendingMessage {
     pub key: String,
     pub kind: String,
+    pub channel: String,
     pub client_id: i64,
     pub car_id: Option<i64>,
     pub phone: String,
@@ -105,18 +111,18 @@ fn display_date(iso: &str) -> String {
     }
 }
 
-fn due_inspections(conn: &Connection, today: &str, now: &str) -> Result<Vec<PendingMessage>> {
+/// Cars due within `days`, overdue ones included. The reminder goes to whoever brought the car
+/// to its latest inspection, or to every linked client when that is not known.
+fn due_inspections(conn: &Connection, today: &str, days: i64) -> Result<Vec<PendingMessage>> {
     let wording = template(conn, KIND_INSPECTION)?;
     let sql = format!(
         "WITH due AS (
              SELECT c.CarID, c.Plate, c.LastRevision, {next} AS NextRevision,
-                    (SELECT a.ClientID FROM appointments a WHERE a.CarID = c.CarID
-                     ORDER BY a.TimeDate DESC LIMIT 1) AS LatestClient
+                    (SELECT i.ClientID FROM inspections i WHERE i.CarID = c.CarID
+                     ORDER BY i.Date DESC LIMIT 1) AS LatestClient
              FROM cars c
              WHERE c.LastRevision IS NOT NULL
-               AND {next} <= date(?1, '+{REMINDER_DAYS} days')
-               AND NOT EXISTS (SELECT 1 FROM appointments a
-                               WHERE a.CarID = c.CarID AND a.IsDone = 0 AND a.TimeDate >= ?2)
+               AND {next} <= date(?1, '+' || ?2 || ' days')
          )
          SELECT d.CarID, d.Plate, d.NextRevision, cl.ClientID, cl.Phone
          FROM due d
@@ -132,7 +138,7 @@ fn due_inspections(conn: &Connection, today: &str, now: &str) -> Result<Vec<Pend
         next = data::NEXT_REVISION,
     );
     let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map(params![today, now], |row| {
+    let rows = statement.query_map(params![today, days], |row| {
         let car_id: i64 = row.get(0)?;
         let plate: String = row.get(1)?;
         let due_date: String = row.get(2)?;
@@ -140,6 +146,7 @@ fn due_inspections(conn: &Connection, today: &str, now: &str) -> Result<Vec<Pend
         Ok(PendingMessage {
             key: format!("{KIND_INSPECTION}:{client_id}:{car_id}"),
             kind: KIND_INSPECTION.to_string(),
+            channel: CHANNEL_SMS.to_string(),
             client_id,
             car_id: Some(car_id),
             phone: row.get(4)?,
@@ -166,6 +173,7 @@ fn due_greetings(conn: &Connection, holiday: &Holiday) -> Result<Vec<PendingMess
         Ok(PendingMessage {
             key: format!("{}:{client_id}:{}", holiday.kind, holiday.date),
             kind: holiday.kind.to_string(),
+            channel: CHANNEL_WHATSAPP.to_string(),
             client_id,
             car_id: None,
             phone: row.get(1)?,
@@ -177,21 +185,22 @@ fn due_greetings(conn: &Connection, holiday: &Holiday) -> Result<Vec<PendingMess
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn pending_at(conn: &Connection, today: &str, now: &str) -> Result<Vec<PendingMessage>> {
-    let mut all = due_inspections(conn, today, now)?;
+fn pending_at(conn: &Connection, today: &str, days: i64) -> Result<Vec<PendingMessage>> {
+    let mut all = due_inspections(conn, today, days)?;
     for holiday in active_holidays(conn, today)? {
         all.extend(due_greetings(conn, &holiday)?);
     }
     Ok(all)
 }
 
-pub fn pending(conn: &Connection) -> Result<Vec<PendingMessage>> {
-    let (today, now): (String, String) = conn.query_row(
-        "SELECT date('now', 'localtime'), strftime('%Y-%m-%dT%H:%M', 'now', 'localtime')",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    pending_at(conn, &today, &now)
+pub fn pending(conn: &Connection, days: i64) -> Result<Vec<PendingMessage>> {
+    // Debug builds can pretend it is another day, to try the greetings outside the holidays.
+    #[cfg(debug_assertions)]
+    if let Ok(today) = std::env::var("VEHICLE_INSPECTION_TODAY") {
+        return pending_at(conn, &today, days);
+    }
+    let today: String = conn.query_row("SELECT date('now', 'localtime')", [], |row| row.get(0))?;
+    pending_at(conn, &today, days)
 }
 
 pub fn record(conn: &Connection, message: &PendingMessage, sent: bool) -> Result<()> {
@@ -262,7 +271,7 @@ mod tests {
     use crate::db::test_connection;
 
     const TODAY: &str = "2030-06-15";
-    const NOW: &str = "2030-06-15T12:00";
+    const DAYS: i64 = DEFAULT_REMINDER_DAYS;
 
     fn add_car(conn: &Connection, plate: &str, last: Option<&str>) -> i64 {
         conn.execute(
@@ -284,11 +293,10 @@ mod tests {
         id
     }
 
-    fn book(conn: &Connection, client: i64, car: i64, time: &str, done: bool) {
+    fn inspect(conn: &Connection, client: Option<i64>, car: i64, date: &str) {
         conn.execute(
-            "INSERT INTO appointments (ClientID, CarID, TimeDate, Duration, IsDone)
-             VALUES (?1, ?2, ?3, 30, ?4)",
-            params![client, car, time, done],
+            "INSERT INTO inspections (ClientID, CarID, Date) VALUES (?1, ?2, ?3)",
+            params![client, car, date],
         )
         .unwrap();
     }
@@ -303,7 +311,7 @@ mod tests {
     }
 
     fn phones_on(conn: &Connection, today: &str) -> Vec<(String, String)> {
-        pending_at(conn, today, &format!("{today}T12:00"))
+        pending_at(conn, today, DAYS)
             .unwrap()
             .into_iter()
             .map(|message| (message.kind, message.phone))
@@ -353,7 +361,7 @@ mod tests {
         let conn = test_connection();
         let car = add_car(&conn, "B1AAA", Some("2029-07-15"));
         add_client(&conn, "0722000001", Some(car));
-        let found = pending_at(&conn, TODAY, NOW).unwrap();
+        let found = pending_at(&conn, TODAY, DAYS).unwrap();
         assert!(found[0].text.contains("B1AAA"), "{}", found[0].text);
         assert!(found[0].text.contains("15.07.2030"), "{}", found[0].text);
     }
@@ -370,38 +378,39 @@ mod tests {
     }
 
     #[test]
-    fn recipient_is_the_latest_appointments_client() {
+    fn the_window_follows_the_chosen_number_of_days() {
+        let conn = test_connection();
+        // Next inspection 2030-12-12 is 180 days after 2030-06-15.
+        let car = add_car(&conn, "B1AAA", Some("2029-12-12"));
+        add_client(&conn, "0722000001", Some(car));
+
+        assert!(phones(&conn).is_empty());
+        let found = pending_at(&conn, TODAY, MAX_REMINDER_DAYS).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(pending_at(&conn, TODAY, MAX_REMINDER_DAYS - 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recipient_is_whoever_brought_the_car_last() {
         let conn = test_connection();
         let car = add_car(&conn, "B1AAA", Some("2029-07-15"));
         let older = add_client(&conn, "0722000001", Some(car));
         let latest = add_client(&conn, "0722000002", Some(car));
-        book(&conn, older, car, "2029-01-01T09:00", true);
-        book(&conn, latest, car, "2029-07-15T09:00", true);
+        inspect(&conn, Some(older), car, "2028-07-15");
+        inspect(&conn, Some(latest), car, "2029-07-15");
 
         assert_eq!(phones(&conn), [inspection("0722000002")]);
     }
 
     #[test]
-    fn without_appointments_every_linked_client_is_listed() {
+    fn without_a_known_client_every_linked_client_is_listed() {
         let conn = test_connection();
         let car = add_car(&conn, "B1AAA", Some("2029-07-15"));
         add_client(&conn, "0722000001", Some(car));
         add_client(&conn, "0722000002", Some(car));
+        inspect(&conn, None, car, "2029-07-15");
 
         assert_eq!(phones(&conn), [inspection("0722000001"), inspection("0722000002")]);
-    }
-
-    #[test]
-    fn upcoming_appointment_skips_the_reminder_but_a_missed_one_does_not() {
-        let conn = test_connection();
-        let booked = add_car(&conn, "B1AAA", Some("2029-07-15"));
-        let client = add_client(&conn, "0722000001", Some(booked));
-        book(&conn, client, booked, "2030-06-20T09:00", false);
-        let missed = add_car(&conn, "B2AAA", Some("2029-07-15"));
-        let other = add_client(&conn, "0722000002", Some(missed));
-        book(&conn, other, missed, "2030-06-10T09:00", false);
-
-        assert_eq!(phones(&conn), [inspection("0722000002")]);
     }
 
     #[test]
@@ -495,7 +504,7 @@ mod tests {
         let car = add_car(&conn, "B1AAA", Some("2029-07-15"));
         add_client(&conn, "0722000001", Some(car));
         save_template(&conn, Template { kind: "inspection".into(), text: " Salut {plate} ".into() }).unwrap();
-        assert_eq!(pending_at(&conn, TODAY, NOW).unwrap()[0].text, "Salut B1AAA");
+        assert_eq!(pending_at(&conn, TODAY, DAYS).unwrap()[0].text, "Salut B1AAA");
 
         let empty = Template { kind: "inspection".into(), text: "  ".into() };
         assert_eq!(save_template(&conn, empty), Err(AppError::code("required_fields")));

@@ -3,10 +3,11 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::backup::{self, BackupStatus, RemoteBackup, Trigger};
 use crate::data::{
-    self, Appointment, AppointmentFilter, AppointmentInput, AppError, Car, CarFilter, CarInput,
-    Client, ClientFilter, ClientInput, DeletePreview, Page, PickerOption, SaveAppointmentResult,
+    self, AppError, Car, CarFilter, CarInput, Client, ClientFilter, ClientInput, DeletePreview,
+    Page, PickerOption,
 };
 use crate::db::{Database, DatabaseInfo};
+use crate::whatsapp::{self, Connection};
 use crate::sms::{self, GatewaySettings, PendingMessage, SendProgress, SentMessage, Template};
 use crate::reports::{self, ExportLabels, Report, ReportRequest};
 
@@ -25,16 +26,6 @@ pub fn list_clients(db: Db<'_>, filter: ClientFilter) -> Result<Page<Client>, Ap
 #[tauri::command]
 pub fn list_cars(db: Db<'_>, filter: CarFilter) -> Result<Page<Car>, AppError> {
     db.with(|conn| data::list_cars(conn, filter))
-}
-
-#[tauri::command]
-pub fn list_appointments(db: Db<'_>, filter: AppointmentFilter) -> Result<Page<Appointment>, AppError> {
-    db.with(|conn| data::list_appointments(conn, filter))
-}
-
-#[tauri::command]
-pub fn appointments_between(db: Db<'_>, from: String, to: String) -> Result<Vec<Appointment>, AppError> {
-    db.with(|conn| data::appointments_between(conn, &from, &to))
 }
 
 #[tauri::command]
@@ -58,16 +49,6 @@ pub fn save_car(db: Db<'_>, input: CarInput) -> Result<PickerOption, AppError> {
 }
 
 #[tauri::command]
-pub fn save_appointment(db: Db<'_>, input: AppointmentInput) -> Result<SaveAppointmentResult, AppError> {
-    db.with(|conn| data::save_appointment(conn, input))
-}
-
-#[tauri::command]
-pub fn set_last_revision(db: Db<'_>, car_id: i64, value: Option<String>) -> Result<(), AppError> {
-    db.with(|conn| data::set_last_revision(conn, car_id, value))
-}
-
-#[tauri::command]
 pub fn preview_delete_client(db: Db<'_>, id: i64) -> Result<DeletePreview, AppError> {
     db.with(|conn| data::preview_delete_client(conn, id))
 }
@@ -85,11 +66,6 @@ pub fn delete_client(db: Db<'_>, id: i64) -> Result<(), AppError> {
 #[tauri::command]
 pub fn delete_car(db: Db<'_>, id: i64) -> Result<(), AppError> {
     db.with(|conn| data::delete_car(conn, id))
-}
-
-#[tauri::command]
-pub fn delete_appointment(db: Db<'_>, id: i64) -> Result<(), AppError> {
-    db.with(|conn| data::delete_appointment(conn, id))
 }
 
 #[tauri::command]
@@ -168,7 +144,7 @@ pub async fn export_report(
         let path = path.into_path().map_err(|e| AppError::from_message(e.to_string()))?;
 
         let report = app.state::<Database>().with(|conn| reports::build(conn, &request))?;
-        let bytes = reports::workbook_bytes(&report, &request, &labels)
+        let bytes = reports::workbook_bytes(&report, &labels)
             .map_err(|e| AppError::from_message(e.to_string()))?;
         reports::save_workbook(path, &bytes).map(Some)
     })
@@ -177,13 +153,43 @@ pub async fn export_report(
 }
 
 #[tauri::command]
+pub fn sms_reminder_days(app: AppHandle) -> Result<i64, AppError> {
+    sms::reminder_days(&app)
+}
+
+#[tauri::command]
+pub fn sms_set_reminder_days(app: AppHandle, days: i64) -> Result<(), AppError> {
+    sms::set_reminder_days(&app, days)
+}
+
+#[tauri::command]
+pub fn sms_interval_seconds(app: AppHandle) -> Result<u64, AppError> {
+    sms::interval_seconds(&app)
+}
+
+#[tauri::command]
+pub async fn whatsapp_status(app: AppHandle) -> Result<Connection, AppError> {
+    whatsapp::status(&app).await
+}
+
+#[tauri::command]
+pub async fn whatsapp_open(app: AppHandle) -> Result<(), AppError> {
+    whatsapp::open(&app)
+}
+
+#[tauri::command]
+pub async fn whatsapp_log_out(app: AppHandle) -> Result<(), AppError> {
+    whatsapp::log_out(&app)
+}
+
+#[tauri::command]
 pub fn sms_pending(app: AppHandle) -> Result<Vec<PendingMessage>, AppError> {
     sms::pending_messages(&app)
 }
 
 #[tauri::command]
-pub async fn sms_send(app: AppHandle, keys: Vec<String>) -> Result<(), AppError> {
-    sms::start_sending(&app, keys).await
+pub async fn sms_send(app: AppHandle, keys: Vec<String>, interval_seconds: u64) -> Result<(), AppError> {
+    sms::start_sending(&app, keys, interval_seconds).await
 }
 
 #[tauri::command]

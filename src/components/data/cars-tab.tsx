@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { PlusIcon } from "lucide-react";
+import { PlusIcon, XIcon } from "lucide-react";
+import { DateRangePicker } from "@/components/date-range-picker";
 import { CarDialog, FREQUENCIES } from "@/components/data/car-dialog";
 import { DeleteDialog } from "@/components/data/delete-dialog";
 import { EmptyRow, Pager, RowActions } from "@/components/data/table-parts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -21,11 +23,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { usePagedList } from "@/hooks/use-paged-list";
-import { api, type Car, type RevisionState } from "@/lib/api";
-import { displayDate, fill } from "@/lib/format";
+import { api, type Car, type CarSort, type RevisionState } from "@/lib/api";
+import { displayDate, fill, parseDate } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 
 const STATES: RevisionState[] = ["overdue", "soon", "ok", "unknown"];
+const SORTS: CarSort[] = ["plate", "newest", "oldest"];
 
 export const STATE_VARIANT = {
   overdue: "destructive",
@@ -48,8 +51,20 @@ export function CarsTab({
   const { t } = useI18n();
   const [frequency, setFrequency] = useState("all");
   const [state, setState] = useState("all");
+  const [sort, setSort] = useState<CarSort>("plate");
+  const [fromText, setFromText] = useState("");
+  const [toText, setToText] = useState("");
   const [editing, setEditing] = useState<Car | "new" | null>(null);
   const [deleting, setDeleting] = useState<Car | null>(null);
+
+  // An empty date means no limit on that side. A half-typed date is ignored until it is valid.
+  const from = parseDate(fromText);
+  const to = parseDate(toText);
+  const sortLabels: Record<CarSort, string> = {
+    plate: t.data.filters.sortPlate,
+    newest: t.data.filters.sortNewest,
+    oldest: t.data.filters.sortOldest,
+  };
 
   const list = usePagedList(
     (page) =>
@@ -57,9 +72,12 @@ export function CarsTab({
         search,
         frequency: frequency === "all" ? null : Number(frequency),
         revisionState: state === "all" ? null : (state as RevisionState),
+        revisionFrom: from,
+        revisionTo: to,
+        sort,
         page,
       }),
-    `${search}|${frequency}|${state}`,
+    `${search}|${frequency}|${state}|${sort}|${from}|${to}`,
     refreshKey,
   );
 
@@ -94,10 +112,64 @@ export function CarsTab({
             ))}
           </SelectContent>
         </Select>
+        <Select value={sort} onValueChange={(value) => setSort(value as CarSort)}>
+          <SelectTrigger className="w-64" aria-label={t.data.lastRevision}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SORTS.map((value) => (
+              <SelectItem key={value} value={value}>
+                {sortLabels[value]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Button className="ml-auto" onClick={() => setEditing("new")}>
           <PlusIcon />
           {t.data.newCar}
         </Button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm">{t.data.lastRevision}</span>
+        <Input
+          className="w-32"
+          value={fromText}
+          aria-label={t.data.filters.lastRevisionFrom}
+          aria-invalid={fromText.trim() !== "" && !from}
+          placeholder={t.data.filters.from}
+          onChange={(event) => setFromText(event.target.value)}
+        />
+        <span className="text-muted-foreground">–</span>
+        <Input
+          className="w-32"
+          value={toText}
+          aria-label={t.data.filters.lastRevisionTo}
+          aria-invalid={toText.trim() !== "" && !to}
+          placeholder={t.data.filters.to}
+          onChange={(event) => setToText(event.target.value)}
+        />
+        <DateRangePicker
+          range={from && to ? { from, to } : null}
+          onChange={(range) => {
+            setFromText(displayDate(range.from));
+            setToText(displayDate(range.to));
+          }}
+        />
+        {(fromText || toText) && (
+          <Button
+            variant="ghost"
+            size="icon"
+            title={t.data.filters.clearDates}
+            aria-label={t.data.filters.clearDates}
+            onClick={() => {
+              setFromText("");
+              setToText("");
+            }}
+          >
+            <XIcon />
+          </Button>
+        )}
       </div>
 
       <Table>

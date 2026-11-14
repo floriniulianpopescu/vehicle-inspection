@@ -19,13 +19,6 @@ export function parseDate(text: string): string | null {
   return `${match[3]}-${match[2].padStart(2, "0")}-${match[1].padStart(2, "0")}`;
 }
 
-/** "9:30" becomes "09:30". Returns null unless it is a real time. */
-export function parseTime(text: string): string | null {
-  const match = text.trim().match(/^(\d{1,2})[:.](\d{2})$/);
-  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) return null;
-  return `${match[1].padStart(2, "0")}:${match[2]}`;
-}
-
 export function todayIso(): string {
   const now = new Date();
   const month = String(now.getMonth() + 1).padStart(2, "0");

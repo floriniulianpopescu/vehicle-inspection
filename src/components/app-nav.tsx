@@ -1,5 +1,4 @@
 import {
-  CalendarDaysIcon,
   DatabaseIcon,
   FileSpreadsheetIcon,
   InfoIcon,
@@ -10,7 +9,6 @@ import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
 
 const items = [
-  { page: "calendar", icon: CalendarDaysIcon },
   { page: "data", icon: DatabaseIcon },
   { page: "reports", icon: FileSpreadsheetIcon },
   { page: "autoSms", icon: MessageSquareIcon },
@@ -30,7 +28,7 @@ export function AppNav({
   const { t } = useI18n();
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-4 border-b px-4">
+    <header className="aero-bar relative z-10 flex h-14 shrink-0 items-center gap-4 border-b px-4">
       <span className="font-heading font-semibold whitespace-nowrap">{t.appName}</span>
       <nav className="flex items-center gap-1">
         {items.map(({ page: target, icon: Icon }) => (

@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -17,10 +17,16 @@ use crate::backup::credentials;
 use crate::backup::secrets::Secret;
 use crate::data::AppError;
 use crate::db::Database;
-use gateway::{Gateway, Outcome};
+use gateway::Gateway;
+use pending::{CHANNEL_WHATSAPP, KIND_INSPECTION};
+use crate::whatsapp;
 pub use pending::{PendingMessage, SentMessage, Template, history, save_template, templates};
+use pending::{DEFAULT_REMINDER_DAYS, MAX_REMINDER_DAYS};
 
-const SEND_INTERVAL: Duration = Duration::from_secs(30);
+/// Seconds between the start of one message and the next. Fewer than 30 risks the phone's
+/// carrier treating the station as spam.
+pub const MIN_INTERVAL_SECONDS: u64 = 30;
+pub const MAX_INTERVAL_SECONDS: u64 = 3600;
 const PROGRESS_EVENT: &str = "sms-progress";
 
 #[cfg(debug_assertions)]
@@ -28,11 +34,26 @@ const INTERVAL_OVERRIDE_VAR: &str = "VEHICLE_INSPECTION_SMS_INTERVAL_MS";
 
 type Result<T> = std::result::Result<T, AppError>;
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(default, rename_all = "camelCase")]
 struct StoredSettings {
     address: String,
     username: String,
+    /// How many days ahead an inspection reminder is offered.
+    reminder_days: i64,
+    /// Seconds between messages, chosen before each send.
+    interval_seconds: u64,
+}
+
+impl Default for StoredSettings {
+    fn default() -> Self {
+        Self {
+            address: String::new(),
+            username: String::new(),
+            reminder_days: DEFAULT_REMINDER_DAYS,
+            interval_seconds: MIN_INTERVAL_SECONDS,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -66,14 +87,14 @@ fn lock_error<T>(error: std::sync::PoisonError<T>) -> AppError {
     AppError::from_message(error.to_string())
 }
 
-fn send_interval() -> Duration {
+fn send_interval(seconds: u64) -> Duration {
     #[cfg(debug_assertions)]
     if let Some(milliseconds) =
         std::env::var(INTERVAL_OVERRIDE_VAR).ok().and_then(|value| value.parse().ok())
     {
         return Duration::from_millis(milliseconds);
     }
-    SEND_INTERVAL
+    Duration::from_secs(seconds)
 }
 
 impl SmsService {
@@ -139,7 +160,9 @@ pub async fn save_gateway_settings(
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         credentials(move || Secret::SmsGatewayPassword.set(&password)).await?;
     }
-    app.state::<SmsService>().store(StoredSettings { address: address.trim().to_string(), username })?;
+    let service = app.state::<SmsService>();
+    let next = StoredSettings { address: address.trim().to_string(), username, ..service.stored()? };
+    service.store(next)?;
     gateway_settings(app).await
 }
 
@@ -158,8 +181,31 @@ pub async fn test_gateway(app: &AppHandle) -> Result<()> {
     open_gateway(app).await?.check().await
 }
 
+pub fn reminder_days(app: &AppHandle) -> Result<i64> {
+    Ok(app.state::<SmsService>().stored()?.reminder_days.clamp(1, MAX_REMINDER_DAYS))
+}
+
+pub fn set_reminder_days(app: &AppHandle, days: i64) -> Result<()> {
+    if !(1..=MAX_REMINDER_DAYS).contains(&days) {
+        return Err(AppError::code("invalid_days"));
+    }
+    let service = app.state::<SmsService>();
+    let mut next = service.stored()?;
+    next.reminder_days = days;
+    service.store(next)
+}
+
+pub fn interval_seconds(app: &AppHandle) -> Result<u64> {
+    Ok(app
+        .state::<SmsService>()
+        .stored()?
+        .interval_seconds
+        .clamp(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS))
+}
+
 pub fn pending_messages(app: &AppHandle) -> Result<Vec<PendingMessage>> {
-    app.state::<Database>().with(|conn| pending::pending(conn))
+    let days = reminder_days(app)?;
+    app.state::<Database>().with(|conn| pending::pending(conn, days))
 }
 
 pub fn progress(app: &AppHandle) -> Result<SendProgress> {
@@ -178,18 +224,37 @@ fn update_progress(app: &AppHandle, change: impl FnOnce(&mut SendProgress)) -> R
 }
 
 /// Starts sending in the background and returns immediately.
-pub async fn start_sending(app: &AppHandle, keys: Vec<String>) -> Result<()> {
+pub async fn start_sending(app: &AppHandle, keys: Vec<String>, interval_seconds: u64) -> Result<()> {
+    if !(MIN_INTERVAL_SECONDS..=MAX_INTERVAL_SECONDS).contains(&interval_seconds) {
+        return Err(AppError::code("invalid_interval"));
+    }
+    // Remembered as the starting value for the next send.
+    let service = app.state::<SmsService>();
+    let mut next = service.stored()?;
+    next.interval_seconds = interval_seconds;
+    service.store(next)?;
     if keys.is_empty() {
         return Ok(());
     }
-    let gateway = open_gateway(app).await?;
-    gateway.check().await?;
+    // Each channel is checked only if the batch uses it.
+    let inspection_prefix = format!("{KIND_INSPECTION}:");
+    let gateway = if keys.iter().any(|key| key.starts_with(&inspection_prefix)) {
+        let gateway = open_gateway(app).await?;
+        gateway.check().await?;
+        Some(gateway)
+    } else {
+        None
+    };
+    if keys.iter().any(|key| !key.starts_with(&inspection_prefix)) {
+        whatsapp::ensure_ready(app).await?;
+    }
     app.state::<SmsService>().begin(keys.len())?;
     update_progress(app, |_| {})?;
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let error = send_batch(&app, &gateway, &keys).await.err();
+        let interval = send_interval(interval_seconds);
+        let error = send_batch(&app, gateway.as_ref(), &keys, interval).await.err();
         let _ = update_progress(&app, |progress| {
             progress.active = false;
             progress.error = error.map(|code| code.as_str().to_string());
@@ -210,10 +275,16 @@ async fn wait_or_stop(service: &SmsService, interval: Duration) -> bool {
     service.stop_requested.load(Ordering::SeqCst)
 }
 
-async fn send_batch(app: &AppHandle, gateway: &Gateway, keys: &[String]) -> Result<()> {
+async fn send_batch(
+    app: &AppHandle,
+    gateway: Option<&Gateway>,
+    keys: &[String],
+    interval: Duration,
+) -> Result<()> {
     let service = app.state::<SmsService>();
-    let interval = send_interval();
-    let mut must_wait = false;
+    // The interval runs from the start of the previous send, so waiting for the phone to
+    // confirm a message does not stretch the batch beyond the estimate shown.
+    let mut previous_start: Option<Instant> = None;
 
     for key in keys {
         // A batch can run for hours, so each message is re-checked: the client
@@ -224,15 +295,22 @@ async fn send_batch(app: &AppHandle, gateway: &Gateway, keys: &[String]) -> Resu
             continue;
         };
 
-        if must_wait && wait_or_stop(&service, interval).await {
+        if let Some(started) = previous_start
+            && wait_or_stop(&service, interval.saturating_sub(started.elapsed())).await
+        {
             break;
         }
         if service.stop_requested.load(Ordering::SeqCst) {
             break;
         }
 
-        let outcome = gateway.send(&message.phone, &message.text).await?;
-        let sent = outcome == Outcome::Sent;
+        previous_start = Some(Instant::now());
+        let sent = if message.channel == CHANNEL_WHATSAPP {
+            whatsapp::send(app, &message.phone, &message.text).await? == whatsapp::Outcome::Sent
+        } else {
+            let gateway = gateway.ok_or_else(|| AppError::code("sms_not_configured"))?;
+            gateway.send(&message.phone, &message.text).await? == gateway::Outcome::Sent
+        };
         app.state::<Database>().with(|conn| pending::record(conn, message, sent))?;
         update_progress(app, |progress| {
             progress.done += 1;
@@ -242,7 +320,6 @@ async fn send_batch(app: &AppHandle, gateway: &Gateway, keys: &[String]) -> Resu
                 progress.failed += 1;
             }
         })?;
-        must_wait = true;
     }
     Ok(())
 }
@@ -270,9 +347,16 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let service = SmsService::new(directory.path());
         service
-            .store(StoredSettings { address: "192.168.1.50".into(), username: "sms".into() })
+            .store(StoredSettings {
+                address: "192.168.1.50".into(),
+                username: "sms".into(),
+                reminder_days: 90,
+                interval_seconds: 45,
+            })
             .unwrap();
         let reopened = SmsService::new(directory.path());
         assert_eq!(reopened.stored().unwrap().address, "192.168.1.50");
+        assert_eq!(reopened.stored().unwrap().reminder_days, 90);
+        assert_eq!(reopened.stored().unwrap().interval_seconds, 45);
     }
 }

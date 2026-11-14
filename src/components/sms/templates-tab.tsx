@@ -50,7 +50,10 @@ function TemplateEditor({ template }: { template: SmsTemplate }) {
         <FormError message={error} />
         <div className="flex items-center justify-between gap-4">
           <span className="text-xs text-muted-foreground">
-            {fill(text.size, { characters: size.characters, parts: size.parts })}
+            {/* Only SMS is billed by length; greetings go through WhatsApp. */}
+            {template.kind === "inspection"
+              ? `${text.smsOnly} ${fill(text.size, { characters: size.characters, parts: size.parts })}`
+              : text.whatsappOnly}
           </span>
           <Button size="sm" disabled={value.trim() === saved} onClick={save}>
             {t.data.save}

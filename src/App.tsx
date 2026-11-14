@@ -7,14 +7,13 @@ import { api } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { AboutPage } from "@/pages/about-page";
 import { AutoSmsPage } from "@/pages/auto-sms-page";
-import { CalendarPage } from "@/pages/calendar-page";
 import { DataPage } from "@/pages/data-page";
 import { ReportsPage } from "@/pages/reports-page";
 import { SettingsPage } from "@/pages/settings-page";
 
 export default function App() {
   const { t } = useI18n();
-  const [page, setPage] = useState<Page>("calendar");
+  const [page, setPage] = useState<Page>("data");
   const [closing, setClosing] = useState(false);
 
   useEffect(() => {
@@ -37,12 +36,10 @@ export default function App() {
   }, []);
 
   return (
-    <div className="flex h-screen flex-col bg-background text-foreground">
+    <div className="aero-backdrop flex h-screen flex-col text-foreground">
       <AppNav page={page} onNavigate={setPage} />
       <main className="min-h-0 flex-1 overflow-auto">
-        {page === "calendar" ? (
-          <CalendarPage />
-        ) : page === "data" ? (
+        {page === "data" ? (
           <DataPage />
         ) : page === "reports" ? (
           <ReportsPage />

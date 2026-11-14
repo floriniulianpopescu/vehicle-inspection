@@ -1,9 +1,25 @@
 import { useEffect, useState } from "react";
-import { CheckIcon, XIcon } from "lucide-react";
+import { CheckIcon, PlusIcon, XIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { api, type PickerOption } from "@/lib/api";
+import { fill } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
+
+/** Digits only, in national form, so "+40 722..." and "0722..." compare equal. */
+export function phoneKey(text: string): string {
+  const digits = text.replace(/\D/g, "");
+  if (digits.startsWith("0040")) return `0${digits.slice(4)}`;
+  if (digits.startsWith("40") && text.trim().startsWith("+")) return `0${digits.slice(2)}`;
+  return digits;
+}
+
+/** Typed numbers not saved yet get negative ids until the form is saved. */
+let nextNewId = -1;
+
+export function isNewOption(option: PickerOption): boolean {
+  return option.id < 0;
+}
 
 /** Searchable list of clients or cars, choosing one or several. */
 export function EntityPicker({
@@ -13,6 +29,7 @@ export function EntityPicker({
   onChange,
   multiple = false,
   linkedTo = null,
+  allowNewPhone = false,
 }: {
   kind: "client" | "car";
   label: string;
@@ -20,6 +37,8 @@ export function EntityPicker({
   onChange: (selected: PickerOption[]) => void;
   multiple?: boolean;
   linkedTo?: number | null;
+  /** Offers to add the typed phone number as a new client. */
+  allowNewPhone?: boolean;
 }) {
   const { t } = useI18n();
   const [search, setSearch] = useState("");
@@ -43,6 +62,19 @@ export function EntityPicker({
 
   const isSelected = (id: number) => selected.some((option) => option.id === id);
 
+  // A typed number that matches nothing listed or already chosen can be added.
+  const typedKey = phoneKey(search);
+  const canAdd =
+    allowNewPhone &&
+    typedKey.length >= 6 &&
+    ![...options, ...selected].some((option) => phoneKey(option.label) === typedKey);
+
+  function addTyped() {
+    const option = { id: nextNewId--, label: search.trim(), linked: false };
+    onChange(multiple ? [...selected, option] : [option]);
+    setSearch("");
+  }
+
   function toggle(option: PickerOption) {
     if (!multiple) onChange([option]);
     else if (isSelected(option.id)) onChange(selected.filter((item) => item.id !== option.id));
@@ -57,6 +89,7 @@ export function EntityPicker({
           {selected.map((option) => (
             <Badge key={option.id} variant="secondary">
               {option.label}
+              {isNewOption(option) && <span className="opacity-70">({t.data.newClientBadge})</span>}
               {multiple && (
                 <button
                   type="button"
@@ -75,9 +108,26 @@ export function EntityPicker({
         placeholder={t.data.searchOptions}
         aria-label={`${label}: ${t.data.searchOptions}`}
         onChange={(event) => setSearch(event.target.value)}
+        onKeyDown={(event) => {
+          // Enter adds the typed number instead of submitting the whole form.
+          if (event.key === "Enter" && canAdd) {
+            event.preventDefault();
+            addTyped();
+          }
+        }}
       />
       <div className="h-28 overflow-y-auto rounded-md border p-1">
-        {options.length === 0 && (
+        {canAdd && (
+          <button
+            type="button"
+            onClick={addTyped}
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-left text-sm font-medium text-primary hover:bg-muted"
+          >
+            <PlusIcon className="size-4" />
+            {fill(t.data.addPhone, { phone: search.trim() })}
+          </button>
+        )}
+        {options.length === 0 && !canAdd && (
           <p className="p-2 text-sm text-muted-foreground">{t.data.noOptions}</p>
         )}
         {options.map((option) => (

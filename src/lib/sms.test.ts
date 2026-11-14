@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { sendingMinutes, smsSize } from "./sms";
+import { clampInterval, sendingSeconds, smsSize, splitDuration } from "./sms";
 
 describe("smsSize", () => {
   test("plain text fits 160 characters in one SMS", () => {
@@ -17,10 +17,23 @@ describe("smsSize", () => {
   });
 });
 
-describe("sendingMinutes", () => {
-  test("rounds up, with no wait before the first message", () => {
-    expect(sendingMinutes(1)).toBe(0);
-    expect(sendingMinutes(2)).toBe(1);
-    expect(sendingMinutes(201)).toBe(100);
+describe("sending time", () => {
+  test("there is no wait before the first message", () => {
+    expect(sendingSeconds(0, 30)).toBe(0);
+    expect(sendingSeconds(1, 30)).toBe(0);
+    expect(sendingSeconds(3, 45)).toBe(90);
+  });
+
+  test("seconds split into hours, minutes and seconds", () => {
+    expect(splitDuration(3930)).toEqual({ hours: 1, minutes: 5, seconds: 30 });
+    expect(splitDuration(59)).toEqual({ hours: 0, minutes: 0, seconds: 59 });
+    expect(splitDuration(7200)).toEqual({ hours: 2, minutes: 0, seconds: 0 });
+  });
+
+  test("the interval is at least 30 seconds", () => {
+    expect(clampInterval("10")).toBe(30);
+    expect(clampInterval("45")).toBe(45);
+    expect(clampInterval("99999")).toBe(3600);
+    expect(clampInterval("")).toBeNull();
   });
 });

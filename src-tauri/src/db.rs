@@ -13,6 +13,7 @@ use crate::data::AppError;
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_auto_sms.sql"),
+    include_str!("../migrations/003_inspections.sql"),
 ];
 
 pub struct Database {
@@ -131,12 +132,12 @@ fn validate_backup(source: &Connection) -> Result<(), AppError> {
     let tables: i64 = source
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
-             AND name IN ('clients', 'cars', 'carsclients', 'appointments')",
+             AND name IN ('clients', 'cars', 'carsclients')",
             [],
             |row| row.get(0),
         )
         .map_err(invalid)?;
-    if integrity != "ok" || tables != 4 {
+    if integrity != "ok" || tables != 3 {
         return Err(AppError::code("backup_invalid"));
     }
 
@@ -213,10 +214,9 @@ mod tests {
             .unwrap()
     }
 
-    fn book(conn: &Connection, client: i64, car: i64) -> rusqlite::Result<usize> {
+    fn inspect(conn: &Connection, client: Option<i64>, car: i64) -> rusqlite::Result<usize> {
         conn.execute(
-            "INSERT INTO appointments (ClientID, CarID, TimeDate, Duration)
-             VALUES (?1, ?2, '2026-11-09T09:30', 30)",
+            "INSERT INTO inspections (ClientID, CarID, Date) VALUES (?1, ?2, '2026-11-09')",
             params![client, car],
         )
     }
@@ -268,7 +268,7 @@ mod tests {
         let (_directory, database) = file_database();
         let snapshot = database.snapshot().unwrap();
         database.restore(&snapshot).unwrap();
-        assert!(database.with(|conn| Ok(book(conn, 99, 99)?)).is_err());
+        assert!(database.with(|conn| Ok(inspect(conn, Some(99), 99)?)).is_err());
     }
 
     #[test]
@@ -400,24 +400,89 @@ mod tests {
     }
 
     #[test]
-    fn appointment_needs_existing_client_and_car() {
+    fn inspection_needs_an_existing_car() {
         let conn = database();
-        assert!(book(&conn, 1, 1).is_err());
+        assert!(inspect(&conn, None, 1).is_err());
     }
 
     #[test]
-    fn deleting_a_car_removes_its_links_and_appointments_but_not_clients() {
+    fn deleting_a_car_removes_its_links_and_inspections_but_not_clients() {
         let conn = database();
         add_client(&conn, "0722000000").unwrap();
         add_car(&conn, "B123ABC", 12).unwrap();
         conn.execute("INSERT INTO carsclients (CarID, ClientID) VALUES (1, 1)", [])
             .unwrap();
-        book(&conn, 1, 1).unwrap();
+        inspect(&conn, Some(1), 1).unwrap();
 
         conn.execute("DELETE FROM cars WHERE CarID = 1", []).unwrap();
 
         assert_eq!(count(&conn, "carsclients"), 0);
-        assert_eq!(count(&conn, "appointments"), 0);
+        assert_eq!(count(&conn, "inspections"), 0);
         assert_eq!(count(&conn, "clients"), 1);
+    }
+
+    #[test]
+    fn deleting_a_client_keeps_the_inspection_without_a_client() {
+        let conn = database();
+        add_client(&conn, "0722000000").unwrap();
+        add_car(&conn, "B123ABC", 12).unwrap();
+        inspect(&conn, Some(1), 1).unwrap();
+
+        conn.execute("DELETE FROM clients WHERE ClientID = 1", []).unwrap();
+
+        let client: Option<i64> =
+            conn.query_row("SELECT ClientID FROM inspections", [], |r| r.get(0)).unwrap();
+        assert_eq!(client, None);
+    }
+
+    #[test]
+    fn upgrading_keeps_done_appointments_and_last_inspections_as_history() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        for sql in &MIGRATIONS[..2] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.execute_batch(
+            "INSERT INTO clients (Phone) VALUES ('0722000001'), ('0722000002');
+             INSERT INTO cars (Plate, Manufacturer, Model, LastRevision, RevisionFrequency) VALUES
+                 ('B1AAA', 'Dacia', 'Logan', '2025-05-01', 12),
+                 ('B2AAA', 'Dacia', 'Logan', '2025-06-01', 12),
+                 ('B3AAA', 'Dacia', 'Logan', '2025-07-01', 12);
+             INSERT INTO carsclients (CarID, ClientID) VALUES (2, 2), (3, 1), (3, 2);
+             INSERT INTO appointments (ClientID, CarID, TimeDate, IsDone, Duration) VALUES
+                 (1, 1, '2024-05-01T09:00', 1, 30),
+                 (1, 1, '2025-05-01T09:00', 1, 30),
+                 (2, 1, '2026-01-01T09:00', 0, 30);",
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let mut query = conn
+            .prepare("SELECT CarID, ClientID, Date FROM inspections ORDER BY CarID, Date")
+            .unwrap();
+        let rows: Vec<(i64, Option<i64>, String)> = query
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (1, Some(1), "2024-05-01".to_string()),
+                (1, Some(1), "2025-05-01".to_string()),
+                (2, Some(2), "2025-06-01".to_string()),
+                (3, None, "2025-07-01".to_string()),
+            ]
+        );
+        let appointments: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'appointments'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(appointments, 0);
     }
 }

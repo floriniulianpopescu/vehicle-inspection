@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "next-themes";
 import { BackupCard } from "@/components/backup/backup-card";
 import { GatewayCard } from "@/components/sms/gateway-card";
-import { CalendarSettingsCard } from "@/components/calendar-settings-card";
+import { WhatsAppCard } from "@/components/sms/whatsapp-card";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import {
@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useI18n, type Language } from "@/lib/i18n";
+import { loadUiScale, saveUiScale, UI_SCALES } from "@/lib/ui-scale";
 
 const THEMES = ["light", "dark", "system"] as const;
 
@@ -27,6 +28,7 @@ export function SettingsPage() {
   const { theme = "system", setTheme } = useTheme();
   const [database, setDatabase] = useState<DatabaseInfo | null>(null);
   const [databaseFailed, setDatabaseFailed] = useState(false);
+  const [uiScale, setUiScale] = useState(loadUiScale);
 
   useEffect(() => {
     invoke<DatabaseInfo>("database_info")
@@ -59,6 +61,27 @@ export function SettingsPage() {
             </Select>
           </div>
           <div className="flex items-center justify-between gap-4">
+            <Label htmlFor="ui-scale">{t.settings.uiScale}</Label>
+            <Select
+              value={String(uiScale)}
+              onValueChange={(value) => {
+                saveUiScale(Number(value));
+                setUiScale(Number(value));
+              }}
+            >
+              <SelectTrigger id="ui-scale" className="w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {UI_SCALES.map((value) => (
+                  <SelectItem key={value} value={String(value)}>
+                    {Math.round(value * 100)}%
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center justify-between gap-4">
             <Label htmlFor="language">{t.settings.language}</Label>
             <Select value={language} onValueChange={(value) => setLanguage(value as Language)}>
               <SelectTrigger id="language" className="w-48">
@@ -73,11 +96,11 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      <CalendarSettingsCard />
-
       <BackupCard />
 
       <GatewayCard />
+
+      <WhatsAppCard />
 
       <Card>
         <CardHeader>

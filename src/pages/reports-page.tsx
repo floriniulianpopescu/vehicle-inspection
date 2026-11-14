@@ -1,62 +1,62 @@
 import { useEffect, useMemo, useState } from "react";
 import { DownloadIcon } from "lucide-react";
 import { toast } from "sonner";
+import { DaysInput } from "@/components/days-input";
 import { FormError } from "@/components/data/field";
-import { DueTab, LoadTab, OverviewTab, ScheduleTab } from "@/components/reports/report-tabs";
+import { DateRangePicker } from "@/components/date-range-picker";
+import { DueTab, InspectedTab, RepeatTab } from "@/components/reports/report-tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api, errorMessage, type Report, type ReportExportLabels, type ReportRequest } from "@/lib/api";
-import { loadCalendarSettings } from "@/lib/calendar";
+import {
+  api,
+  errorMessage,
+  MAX_EXPIRING_DAYS,
+  type Report,
+  type ReportExportLabels,
+  type ReportRequest,
+} from "@/lib/api";
 import { displayDate, fill, parseDate, todayIso } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
-import { monthRange, weekRange, type DateRange } from "@/lib/reports";
+import { monthRange, weekRange, yearRange, type DateRange } from "@/lib/reports";
 import type { Messages } from "@/locales/ro";
+
+const DAYS_KEY = "report-expiring-days";
+const DEFAULT_DAYS = 30;
+
+function storedDays(): number {
+  try {
+    const value = Number(localStorage.getItem(DAYS_KEY));
+    return Number.isInteger(value) && value >= 1 && value <= MAX_EXPIRING_DAYS ? value : DEFAULT_DAYS;
+  } catch {
+    return DEFAULT_DAYS;
+  }
+}
 
 function exportLabels(t: Messages): ReportExportLabels {
   const text = t.reports;
   return {
-    sheetOverview: text.sheets.overview,
-    sheetSchedule: text.sheets.schedule,
-    sheetLoad: text.sheets.load,
-    sheetDue: text.sheets.due,
-    title: text.title,
-    period: text.period,
-    generatedAt: text.generatedAt,
-    appointments: text.appointments,
-    completedOfPast: text.completedOfPast,
-    completionRate: text.completionRate,
-    overdueCars: text.overdueCars,
-    messagesSent: text.messagesSent,
-    bookedHours: text.bookedHours,
-    appointmentsPerDay: text.appointmentsPerDay,
-    bookedPerDay: text.bookedPerDay,
+    sheetInspected: text.sheets.inspected,
+    sheetExpiring: text.sheets.expiring,
+    sheetExpired: text.sheets.expired,
+    sheetRepeatCars: text.sheets.repeatCars,
+    sheetRepeatClients: text.sheets.repeatClients,
     date: t.data.date,
-    weekday: text.weekday,
-    time: t.data.time,
-    durationMinutes: t.data.duration,
     plate: t.data.plate,
     manufacturer: t.data.manufacturer,
     model: t.data.model,
+    broughtBy: text.broughtBy,
     phone: t.data.phone,
-    done: t.data.done,
-    yes: text.yes,
-    no: text.no,
-    workingHours: text.workingHours,
-    loadPercent: text.loadPercent,
-    status: text.status,
-    overbooked: text.overbooked,
-    withinCapacity: text.withinCapacity,
-    stateLabel: {
-      overdue: t.data.states.overdue,
-      soon: t.data.states.soon,
-      unknown: t.data.states.unknown,
-    },
+    phones: text.phones,
     lastRevision: t.data.lastRevision,
     nextRevision: t.data.nextRevision,
-    phones: text.phones,
-    weekdays: text.weekdays,
+    daysLeft: text.daysLeft,
+    daysOverdue: text.daysOverdue,
+    visits: text.visits,
+    firstVisit: text.firstVisit,
+    lastVisit: text.lastVisit,
+    plates: text.plates,
   };
 }
 
@@ -64,20 +64,24 @@ export function ReportsPage() {
   const { t } = useI18n();
   const text = t.reports;
   const today = todayIso();
-  const initial = weekRange(today);
+  const initial = monthRange(today);
   const [fromText, setFromText] = useState(displayDate(initial.from));
   const [toText, setToText] = useState(displayDate(initial.to));
+  const [days, setDays] = useState(storedDays);
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
 
-  const request = useMemo<ReportRequest | null>(() => {
+  const range = useMemo<DateRange | null>(() => {
     const from = parseDate(fromText);
     const to = parseDate(toText);
-    if (!from || !to || from > to) return null;
-    const { days, startHour, endHour } = loadCalendarSettings();
-    return { from, to, workingDays: days, startHour, endHour };
+    return from && to && from <= to ? { from, to } : null;
   }, [fromText, toText]);
+
+  const request = useMemo<ReportRequest | null>(
+    () => (range ? { ...range, expiringDays: days } : null),
+    [range, days],
+  );
 
   useEffect(() => {
     if (!request) {
@@ -100,16 +104,25 @@ export function ReportsPage() {
     };
   }, [request, t]);
 
-  function choose(range: DateRange) {
-    setFromText(displayDate(range.from));
-    setToText(displayDate(range.to));
+  function choose(next: DateRange) {
+    setFromText(displayDate(next.from));
+    setToText(displayDate(next.to));
+  }
+
+  function changeDays(next: number) {
+    setDays(next);
+    try {
+      localStorage.setItem(DAYS_KEY, String(next));
+    } catch {
+      // Kept for this session only.
+    }
   }
 
   async function exportFile() {
     if (!request) return;
     setExporting(true);
     try {
-      const fileName = `${text.fileName}-${request.from}-${request.to}.xlsx`;
+      const fileName = `${text.fileName}-${today}.xlsx`;
       const saved = await api.exportReport(request, exportLabels(t), fileName);
       if (saved) toast.success(fill(text.exported, { path: saved }));
     } catch (failure) {
@@ -119,64 +132,83 @@ export function ReportsPage() {
     }
   }
 
+  const periodControls = (
+    <div className="flex flex-wrap items-center gap-2">
+      <Input
+        className="w-32"
+        value={fromText}
+        aria-label={t.data.filters.from}
+        placeholder={t.data.dateFormat}
+        onChange={(event) => setFromText(event.target.value)}
+      />
+      <span className="text-muted-foreground">–</span>
+      <Input
+        className="w-32"
+        value={toText}
+        aria-label={t.data.filters.to}
+        placeholder={t.data.dateFormat}
+        onChange={(event) => setToText(event.target.value)}
+      />
+      <DateRangePicker range={range} onChange={choose} />
+      <Button variant="outline" onClick={() => choose({ from: today, to: today })}>
+        {text.today}
+      </Button>
+      <Button variant="outline" onClick={() => choose(weekRange(today))}>
+        {text.thisWeek}
+      </Button>
+      <Button variant="outline" onClick={() => choose(monthRange(today))}>
+        {text.thisMonth}
+      </Button>
+      <Button variant="outline" onClick={() => choose(yearRange(today))}>
+        {text.thisYear}
+      </Button>
+    </div>
+  );
+
+  const count = (value: number) => <Badge variant="secondary">{value}</Badge>;
+
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-4 p-6">
-      <div className="flex flex-wrap items-center gap-2">
-        <Input
-          className="w-32"
-          value={fromText}
-          aria-label={t.data.filters.from}
-          placeholder={t.data.dateFormat}
-          onChange={(event) => setFromText(event.target.value)}
-        />
-        <span className="text-muted-foreground">–</span>
-        <Input
-          className="w-32"
-          value={toText}
-          aria-label={t.data.filters.to}
-          placeholder={t.data.dateFormat}
-          onChange={(event) => setToText(event.target.value)}
-        />
-        <Button variant="outline" onClick={() => choose({ from: today, to: today })}>
-          {text.today}
-        </Button>
-        <Button variant="outline" onClick={() => choose(weekRange(today))}>
-          {text.thisWeek}
-        </Button>
-        <Button variant="outline" onClick={() => choose(monthRange(today))}>
-          {text.thisMonth}
-        </Button>
-        <Button className="ml-auto" disabled={!request || exporting} onClick={exportFile}>
-          <DownloadIcon />
-          {exporting ? text.exporting : text.export}
-        </Button>
-      </div>
-
       <FormError message={error} />
 
       {report && (
-        <Tabs defaultValue="overview">
-          <TabsList>
-            <TabsTrigger value="overview">{text.tabs.overview}</TabsTrigger>
-            <TabsTrigger value="schedule">
-              {text.tabs.schedule} <Badge variant="secondary">{report.schedule.length}</Badge>
-            </TabsTrigger>
-            <TabsTrigger value="load">{text.tabs.load}</TabsTrigger>
-            <TabsTrigger value="due">
-              {text.tabs.due} <Badge variant="secondary">{report.due.length}</Badge>
-            </TabsTrigger>
-          </TabsList>
-          <TabsContent value="overview">
-            <OverviewTab report={report} />
+        <Tabs defaultValue="inspected">
+          <div className="flex flex-wrap items-center gap-2">
+            <TabsList>
+              <TabsTrigger value="inspected">
+                {text.tabs.inspected} {count(report.inspected.length)}
+              </TabsTrigger>
+              <TabsTrigger value="expiring">
+                {text.tabs.expiring} {count(report.expiring.length)}
+              </TabsTrigger>
+              <TabsTrigger value="expired">
+                {text.tabs.expired} {count(report.expired.length)}
+              </TabsTrigger>
+              <TabsTrigger value="repeat">
+                {text.tabs.repeat} {count(report.repeatCars.length + report.repeatClients.length)}
+              </TabsTrigger>
+            </TabsList>
+            <Button className="ml-auto" disabled={!request || exporting} onClick={exportFile}>
+              <DownloadIcon />
+              {exporting ? text.exporting : text.export}
+            </Button>
+          </div>
+          <TabsContent value="inspected">
+            <InspectedTab report={report} controls={periodControls} />
           </TabsContent>
-          <TabsContent value="schedule">
-            <ScheduleTab report={report} />
+          <TabsContent value="expiring">
+            <DueTab
+              rows={report.expiring}
+              expired={false}
+              hint={text.expiringHint}
+              controls={<DaysInput label={text.expiringWithin} value={days} onCommit={changeDays} />}
+            />
           </TabsContent>
-          <TabsContent value="load">
-            <LoadTab report={report} />
+          <TabsContent value="expired">
+            <DueTab rows={report.expired} expired hint={text.expiredHint} />
           </TabsContent>
-          <TabsContent value="due">
-            <DueTab report={report} />
+          <TabsContent value="repeat">
+            <RepeatTab report={report} />
           </TabsContent>
         </Tabs>
       )}

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { SearchIcon } from "lucide-react";
-import { AppointmentsTab } from "@/components/data/appointments-tab";
 import { CarsTab } from "@/components/data/cars-tab";
 import { ClientsTab } from "@/components/data/clients-tab";
 import { Badge } from "@/components/ui/badge";
@@ -18,7 +17,6 @@ export function DataPage() {
   const [searchText, setSearchText] = useState("");
   const [search, setSearch] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
-  const [appointments, setAppointments] = useState(0);
   const [cars, setCars] = useState(0);
   const [clients, setClients] = useState(0);
 
@@ -27,7 +25,7 @@ export function DataPage() {
     return () => clearTimeout(timer);
   }, [searchText]);
 
-  // Any change can affect another tab, e.g. a booking links a car and a client.
+  // Any change can affect the other tab, e.g. saving a car links its clients.
   const shared = {
     search,
     refreshKey,
@@ -47,11 +45,8 @@ export function DataPage() {
         />
       </div>
 
-      <Tabs defaultValue="appointments">
+      <Tabs defaultValue="cars">
         <TabsList>
-          <TabsTrigger value="appointments">
-            {t.data.appointments} <Badge variant="secondary">{appointments}</Badge>
-          </TabsTrigger>
           <TabsTrigger value="cars">
             {t.data.cars} <Badge variant="secondary">{cars}</Badge>
           </TabsTrigger>
@@ -59,9 +54,6 @@ export function DataPage() {
             {t.data.clients} <Badge variant="secondary">{clients}</Badge>
           </TabsTrigger>
         </TabsList>
-        <TabsContent value="appointments" forceMount className={PANEL_CLASS}>
-          <AppointmentsTab {...shared} onTotal={setAppointments} />
-        </TabsContent>
         <TabsContent value="cars" forceMount className={PANEL_CLASS}>
           <CarsTab {...shared} onTotal={setCars} />
         </TabsContent>
