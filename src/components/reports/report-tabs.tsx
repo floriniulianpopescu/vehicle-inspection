@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { EmptyRow } from "@/components/data/table-parts";
+import { ShowMore, useShowMore } from "@/components/show-more";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -20,6 +21,7 @@ function Hint({ children }: { children: ReactNode }) {
 
 export function InspectedTab({ report, controls }: { report: Report; controls: ReactNode }) {
   const { t } = useI18n();
+  const { shown, hidden, more } = useShowMore(report.inspected, report);
   return (
     <div className="flex flex-col gap-3">
       {controls}
@@ -37,7 +39,7 @@ export function InspectedTab({ report, controls }: { report: Report; controls: R
         </TableHeader>
         <TableBody>
           {report.inspected.length === 0 && <EmptyRow columns={6} />}
-          {report.inspected.map((row) => (
+          {shown.map((row) => (
             <TableRow key={row.inspectionId}>
               <TableCell>{displayDate(row.date)}</TableCell>
               <TableCell className="font-medium">{row.plate}</TableCell>
@@ -49,6 +51,7 @@ export function InspectedTab({ report, controls }: { report: Report; controls: R
           ))}
         </TableBody>
       </Table>
+      <ShowMore hidden={hidden} onMore={more} />
     </div>
   );
 }
@@ -66,6 +69,7 @@ export function DueTab({
   controls?: ReactNode;
 }) {
   const { t } = useI18n();
+  const { shown, hidden, more } = useShowMore(rows, rows);
   return (
     <div className="flex flex-col gap-3">
       {controls}
@@ -84,7 +88,7 @@ export function DueTab({
         </TableHeader>
         <TableBody>
           {rows.length === 0 && <EmptyRow columns={7} />}
-          {rows.map((car) => (
+          {shown.map((car) => (
             <TableRow key={car.carId}>
               <TableCell className="font-medium">{car.plate}</TableCell>
               <TableCell>{car.manufacturer}</TableCell>
@@ -99,6 +103,7 @@ export function DueTab({
           ))}
         </TableBody>
       </Table>
+      <ShowMore hidden={hidden} onMore={more} />
     </div>
   );
 }
@@ -106,6 +111,8 @@ export function DueTab({
 export function RepeatTab({ report }: { report: Report }) {
   const { t } = useI18n();
   const text = t.reports;
+  const cars = useShowMore(report.repeatCars, report);
+  const clients = useShowMore(report.repeatClients, report);
   return (
     <div className="flex flex-col gap-4">
       <Hint>{text.repeatHint}</Hint>
@@ -130,7 +137,7 @@ export function RepeatTab({ report }: { report: Report }) {
             </TableHeader>
             <TableBody>
               {report.repeatCars.length === 0 && <EmptyRow columns={7} />}
-              {report.repeatCars.map((car) => (
+              {cars.shown.map((car) => (
                 <TableRow key={car.carId}>
                   <TableCell className="font-medium">{car.plate}</TableCell>
                   <TableCell>{car.manufacturer}</TableCell>
@@ -143,6 +150,9 @@ export function RepeatTab({ report }: { report: Report }) {
               ))}
             </TableBody>
           </Table>
+          <div className="flex justify-center pt-2">
+            <ShowMore hidden={cars.hidden} onMore={cars.more} />
+          </div>
         </CardContent>
       </Card>
       <Card>
@@ -163,7 +173,7 @@ export function RepeatTab({ report }: { report: Report }) {
             </TableHeader>
             <TableBody>
               {report.repeatClients.length === 0 && <EmptyRow columns={4} />}
-              {report.repeatClients.map((client) => (
+              {clients.shown.map((client) => (
                 <TableRow key={client.clientId}>
                   <TableCell className="font-medium">{client.phone}</TableCell>
                   <TableCell>{client.visits}</TableCell>
@@ -173,6 +183,9 @@ export function RepeatTab({ report }: { report: Report }) {
               ))}
             </TableBody>
           </Table>
+          <div className="flex justify-center pt-2">
+            <ShowMore hidden={clients.hidden} onMore={clients.more} />
+          </div>
         </CardContent>
       </Card>
     </div>

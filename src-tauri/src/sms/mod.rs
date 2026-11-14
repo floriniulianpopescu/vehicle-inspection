@@ -89,6 +89,9 @@ pub struct SmsService {
     progress: Mutex<SendProgress>,
     stop_requested: AtomicBool,
     stop_signal: Notify,
+    /// Whether a phone password is saved, once known. Asking the system password store is slow,
+    /// and the Auto SMS page needs this every time it opens.
+    has_password: Mutex<Option<bool>>,
 }
 
 fn lock_error<T>(error: std::sync::PoisonError<T>) -> AppError {
@@ -118,6 +121,7 @@ impl SmsService {
             progress: Mutex::new(SendProgress::default()),
             stop_requested: AtomicBool::new(false),
             stop_signal: Notify::new(),
+            has_password: Mutex::new(None),
         }
     }
 
@@ -148,8 +152,17 @@ impl SmsService {
 }
 
 pub async fn gateway_settings(app: &AppHandle) -> Result<GatewaySettings> {
-    let stored = app.state::<SmsService>().stored()?;
-    let has_password = credentials(|| Secret::SmsGatewayPassword.get()).await?.is_some();
+    let service = app.state::<SmsService>();
+    let stored = service.stored()?;
+    let known = *service.has_password.lock().map_err(lock_error)?;
+    let has_password = match known {
+        Some(known) => known,
+        None => {
+            let found = credentials(|| Secret::SmsGatewayPassword.get()).await?.is_some();
+            *service.has_password.lock().map_err(lock_error)? = Some(found);
+            found
+        }
+    };
     Ok(GatewaySettings { address: stored.address, username: stored.username, has_password })
 }
 
@@ -165,10 +178,11 @@ pub async fn save_gateway_settings(
     if username.is_empty() {
         return Err(AppError::code("required_fields"));
     }
+    let service = app.state::<SmsService>();
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         credentials(move || Secret::SmsGatewayPassword.set(&password)).await?;
+        *service.has_password.lock().map_err(lock_error)? = Some(true);
     }
-    let service = app.state::<SmsService>();
     let next = StoredSettings { address: address.trim().to_string(), username, ..service.stored()? };
     service.store(next)?;
     gateway_settings(app).await

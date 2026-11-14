@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ImageIcon, SendIcon, SquareIcon } from "lucide-react";
 import { DaysInput } from "@/components/days-input";
 import { FormError } from "@/components/data/field";
+import { ShowMore, useShowMore } from "@/components/show-more";
 import { EmptyRow } from "@/components/data/table-parts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -45,43 +46,28 @@ function matches(item: PendingMessage, filter: Filter, today: string): boolean {
 }
 
 /**
- * One kind of waiting message: ITP reminders by SMS, or greetings or feedback by WhatsApp.
- * Each has its own list and Send button; only one batch runs at a time.
+ * What the Auto SMS page loads once and shares with its three message tabs: every waiting
+ * message, whether the SMS phone is set up, and the progress of the running batch.
  */
-export function PendingTab({ group }: { group: Group }) {
+export function usePendingMessages() {
   const { t } = useI18n();
-  const text = t.sms;
-  const isSms = group === "reminders";
-  const channel = isSms ? "sms" : "whatsapp";
   const [all, setAll] = useState<PendingMessage[]>([]);
-  const items = all.filter((item) => groupOf(item.kind) === group);
-  const [skipped, setSkipped] = useState<Set<string>>(new Set());
-  const [filter, setFilter] = useState<Filter>("all");
   const [progress, setProgress] = useState<SendProgress | null>(null);
-  // Stop finishes or drops the message in progress, which can take a few seconds.
-  const [stopping, setStopping] = useState(false);
   const [configured, setConfigured] = useState(true);
-  const [days, setDays] = useState<number | null>(null);
-  const [intervalText, setIntervalText] = useState(String(MIN_INTERVAL_SECONDS));
   const [error, setError] = useState<string | null>(null);
 
   const reload = useCallback(() => {
     api
       .smsPending()
-      .then(setAll)
+      .then((next) => {
+        setAll(next);
+        setError(null);
+      })
       .catch((failure) => setError(errorMessage(t, failure)));
   }, [t]);
 
   useEffect(() => {
     reload();
-    api
-      .smsReminderDays()
-      .then(setDays)
-      .catch(() => {});
-    api
-      .smsIntervalSeconds(channel)
-      .then((seconds) => setIntervalText(String(seconds)))
-      .catch(() => {});
     api.smsProgress().then(setProgress).catch(() => {});
     api
       .smsGatewaySettings()
@@ -89,18 +75,57 @@ export function PendingTab({ group }: { group: Group }) {
         setConfigured(Boolean(settings.address && settings.username && settings.hasPassword)),
       )
       .catch(() => setConfigured(false));
-  }, [reload, channel]);
+  }, [reload]);
 
   useEffect(() => {
     const stop = listen<SendProgress>("sms-progress", (event) => {
       setProgress(event.payload);
-      if (!event.payload.active) {
-        setStopping(false);
-        reload();
-      }
+      if (!event.payload.active) reload();
     });
     return () => void stop.then((unlisten) => unlisten());
   }, [reload]);
+
+  return { all, reload, progress, configured, error };
+}
+
+export type PendingMessages = ReturnType<typeof usePendingMessages>;
+
+/**
+ * One kind of waiting message: ITP reminders by SMS, or greetings or feedback by WhatsApp.
+ * Each has its own list and Send button; only one batch runs at a time.
+ */
+export function PendingTab({ group, shared }: { group: Group; shared: PendingMessages }) {
+  const { t } = useI18n();
+  const text = t.sms;
+  const isSms = group === "reminders";
+  const channel = isSms ? "sms" : "whatsapp";
+  const { all, reload, progress, configured } = shared;
+  const items = all.filter((item) => groupOf(item.kind) === group);
+  const [skipped, setSkipped] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState<Filter>("all");
+  // Stop finishes or drops the message in progress, which can take a few seconds.
+  const [stopping, setStopping] = useState(false);
+  const [days, setDays] = useState<number | null>(null);
+  const [intervalText, setIntervalText] = useState(String(MIN_INTERVAL_SECONDS));
+  const [ownError, setError] = useState<string | null>(null);
+  const error = ownError ?? shared.error;
+
+  useEffect(() => {
+    if (isSms) {
+      api
+        .smsReminderDays()
+        .then(setDays)
+        .catch(() => {});
+    }
+    api
+      .smsIntervalSeconds(channel)
+      .then((seconds) => setIntervalText(String(seconds)))
+      .catch(() => {});
+  }, [isSms, channel]);
+
+  useEffect(() => {
+    if (!progress?.active) setStopping(false);
+  }, [progress?.active]);
 
   const sending = progress?.active ?? false;
   // Only what the filter shows is selected and sent.
@@ -113,6 +138,8 @@ export function PendingTab({ group }: { group: Group }) {
   const visible = isSms ? items.filter((item) => matches(item, filter, today)) : items;
   const selected = visible.filter((item) => !skipped.has(item.key));
   const allSelected = visible.length > 0 && selected.length === visible.length;
+  // Only the drawing is limited; selecting and sending use the whole list.
+  const { shown, hidden, more } = useShowMore(visible, `${filter}|${all.length}`);
 
   function toggle(key: string, checked: boolean) {
     setSkipped((previous) => {
@@ -302,7 +329,7 @@ export function PendingTab({ group }: { group: Group }) {
         </TableHeader>
         <TableBody>
           {visible.length === 0 && <EmptyRow columns={5} />}
-          {visible.map((item) => (
+          {shown.map((item) => (
             <TableRow key={item.key}>
               <TableCell>
                 <Checkbox
@@ -332,6 +359,7 @@ export function PendingTab({ group }: { group: Group }) {
           ))}
         </TableBody>
       </Table>
+      <ShowMore hidden={hidden} onMore={more} />
     </div>
   );
 }

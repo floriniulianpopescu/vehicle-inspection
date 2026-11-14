@@ -83,6 +83,19 @@ export function ReportsPage() {
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  // The print copy holds every list in full, so it exists only while printing.
+  const [printing, setPrinting] = useState(false);
+
+  useEffect(() => {
+    if (!printing) return;
+    const done = () => setPrinting(false);
+    window.addEventListener("afterprint", done, { once: true });
+    const frame = requestAnimationFrame(() => printReport());
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("afterprint", done);
+    };
+  }, [printing]);
 
   const range = useMemo<DateRange | null>(() => {
     const from = parseDate(fromText);
@@ -220,7 +233,7 @@ export function ReportsPage() {
                 ))}
               </SelectContent>
             </Select>
-            <Button variant="outline" disabled={!request} onClick={printReport}>
+            <Button variant="outline" disabled={!request} onClick={() => setPrinting(true)}>
               <PrinterIcon />
               {text.print}
             </Button>
@@ -248,7 +261,7 @@ export function ReportsPage() {
           </TabsContent>
         </Tabs>
       )}
-      {report && request && <ReportPrint report={report} request={request} />}
+      {printing && report && request && <ReportPrint report={report} request={request} />}
     </div>
   );
 }

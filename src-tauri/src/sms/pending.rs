@@ -135,19 +135,26 @@ fn display_date(iso: &str) -> String {
 fn due_inspections(conn: &Connection, today: &str, days: i64) -> Result<Vec<PendingMessage>> {
     let wording = template(conn, KIND_INSPECTION)?;
     let sql = format!(
-        "WITH due AS (
+        "WITH due AS MATERIALIZED (
              SELECT c.CarID, c.Plate, c.LastRevision, {next} AS NextRevision,
                     (SELECT i.ClientID FROM inspections i WHERE i.CarID = c.CarID
                      ORDER BY i.Date DESC LIMIT 1) AS LatestClient
              FROM cars c
              WHERE c.LastRevision IS NOT NULL
                AND {next} <= date(?1, '+' || ?2 || ' days')
+         ),
+         -- Two plain lookups instead of one join with OR, which made SQLite compare every due
+         -- car with every client (seconds with a few thousand cars).
+         recipients AS (
+             SELECT CarID, LatestClient AS ClientID FROM due WHERE LatestClient IS NOT NULL
+             UNION ALL
+             SELECT d.CarID, l.ClientID FROM due d JOIN carsclients l ON l.CarID = d.CarID
+             WHERE d.LatestClient IS NULL
          )
          SELECT d.CarID, d.Plate, d.NextRevision, cl.ClientID, cl.Phone
-         FROM due d
-         JOIN clients cl ON cl.ClientID = d.LatestClient
-             OR (d.LatestClient IS NULL AND cl.ClientID IN
-                 (SELECT l.ClientID FROM carsclients l WHERE l.CarID = d.CarID))
+         FROM recipients r
+         JOIN due d ON d.CarID = r.CarID
+         JOIN clients cl ON cl.ClientID = r.ClientID
          WHERE cl.SmsOptOut = 0
            AND NOT EXISTS (SELECT 1 FROM messages m
                            WHERE m.CarID = d.CarID AND m.ClientID = cl.ClientID
@@ -219,9 +226,13 @@ fn due_feedback(conn: &Connection, today: &str) -> Result<Vec<PendingMessage>> {
         "SELECT c.CarID, c.Plate, cl.ClientID, cl.Phone, i.Date
          FROM inspections i
          JOIN cars c ON c.CarID = i.CarID
-         JOIN clients cl ON cl.ClientID = i.ClientID
-             OR (i.ClientID IS NULL AND cl.ClientID IN
-                 (SELECT l.ClientID FROM carsclients l WHERE l.CarID = i.CarID))
+         JOIN (SELECT i2.InspectionID, i2.ClientID FROM inspections i2
+               WHERE i2.Date = ?1 AND i2.ClientID IS NOT NULL
+               UNION ALL
+               SELECT i2.InspectionID, l.ClientID FROM inspections i2
+               JOIN carsclients l ON l.CarID = i2.CarID
+               WHERE i2.Date = ?1 AND i2.ClientID IS NULL) r ON r.InspectionID = i.InspectionID
+         JOIN clients cl ON cl.ClientID = r.ClientID
          WHERE i.Date = ?1 AND cl.SmsOptOut = 0
            AND NOT EXISTS (SELECT 1 FROM messages m
                            WHERE m.Type = 'feedback' AND m.Status = 'sent'

@@ -112,6 +112,7 @@ export const en: Messages = {
     searchOptions: "Search…",
     noOptions: "No results.",
     noRows: "No records.",
+    showMore: "Show {count} more ({left} left)",
     page: "Page {page} of {pages}",
     previous: "Previous",
     next: "Next",

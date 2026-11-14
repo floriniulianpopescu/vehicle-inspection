@@ -112,6 +112,7 @@ export const ro = {
     searchOptions: "Caută…",
     noOptions: "Niciun rezultat.",
     noRows: "Nu există înregistrări.",
+    showMore: "Arată încă {count} (mai sunt {left})",
     page: "Pagina {page} din {pages}",
     previous: "Înapoi",
     next: "Înainte",
