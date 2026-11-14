@@ -30,8 +30,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // The WhatsApp window closes on its own; only the main window ends the app.
+            // Closing the WhatsApp window stops a running batch; only the main window ends the app.
             if window.label() != "main" {
+                if let WindowEvent::Destroyed = event {
+                    sms::stop_sending(window.app_handle());
+                }
                 return;
             }
             if let WindowEvent::Destroyed = event {
@@ -39,6 +42,8 @@ pub fn run() {
                 return;
             }
             let WindowEvent::CloseRequested { api, .. } = event else { return };
+            // Sending stops first, so the backup taken on close includes what was sent.
+            sms::stop_sending(window.app_handle());
             if !window.state::<BackupService>().begin_closing() {
                 return;
             }

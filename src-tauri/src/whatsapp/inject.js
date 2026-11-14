@@ -115,6 +115,9 @@
   }
 
   let job = null;
+  // Set when staff press Stop. Before Send is pressed the message is dropped; after, it is
+  // only confirmed quickly.
+  let cancelled = null;
 
   async function send(token, text, navigatedAt) {
     // Only the page opened for this message may act. An older page could still be showing the
@@ -127,10 +130,13 @@
     const trace = (stage) => report({ token, kind: "trace", stage });
     const finish = (result) => report({ token, kind: "send", result });
 
+    const stopped = () => cancelled === token;
+
     trace("waiting for the chat");
     const openedAt = Date.now();
     let box = null;
     while (Date.now() - openedAt < OPEN_CHAT_LIMIT_MS) {
+      if (stopped()) return finish("cancelled");
       if (state() === "qr") return finish("not_ready");
       if (invalidNumberDialog()) return finish("invalid");
       box = composerWith(expected);
@@ -141,6 +147,7 @@
 
     // Let WhatsApp finish setting up the chat before pressing anything.
     await wait(1500);
+    if (stopped()) return finish("cancelled");
     box = composerWith(expected) || box;
     const panel = chatPanel(box);
 
@@ -166,6 +173,8 @@
       if (message) {
         last = tickState(message);
         if (last === "sent") return finish("sent");
+        // Stopping: the message is in the chat, so WhatsApp has it.
+        if (stopped()) return finish("sent_unconfirmed");
       }
       await wait(POLL_MS);
     }
@@ -177,6 +186,9 @@
 
   window.__vi = {
     probe: (token) => report({ token, kind: "status", state: state() }),
+    cancel: (token) => {
+      cancelled = token;
+    },
     send,
   };
 })();

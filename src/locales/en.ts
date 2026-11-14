@@ -244,6 +244,7 @@ export const en: Messages = {
     progress: "Sending: {done} of {total}",
     keepOpen: "Keep the app open until it finishes.",
     stop: "Stop",
+    stopping: "Stopping…",
     finished: "Last send: {sent} sent, {failed} failed.",
     notConfigured: "Set up the phone in Settings to be able to send.",
     placeholders: "{plate} becomes the car's plate, and {date} the inspection date.",

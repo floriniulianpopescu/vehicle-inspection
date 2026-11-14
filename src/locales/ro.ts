@@ -244,6 +244,7 @@ export const ro = {
     progress: "Se trimite: {done} din {total}",
     keepOpen: "Lasă aplicația deschisă până la final.",
     stop: "Oprește",
+    stopping: "Se oprește…",
     finished: "Ultima trimitere: {sent} trimise, {failed} eșuate.",
     notConfigured: "Configurează telefonul în Setări pentru a putea trimite.",
     placeholders: "{plate} devine numărul mașinii, iar {date} data inspecției.",

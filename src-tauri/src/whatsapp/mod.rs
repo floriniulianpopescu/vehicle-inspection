@@ -11,12 +11,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 
 use crate::data::AppError;
 
@@ -30,6 +30,8 @@ const READY_LIMIT: Duration = Duration::from_secs(45);
 /// Opening the chat, sending and waiting for WhatsApp to confirm.
 const SEND_LIMIT: Duration = Duration::from_secs(120);
 const RETRY_EVERY: Duration = Duration::from_secs(1);
+/// After Stop, how long to wait for the page to say whether it already pressed Send.
+const STOP_GRACE: Duration = Duration::from_secs(10);
 const LOG_FILE: &str = "whatsapp-log.txt";
 /// The log is started over once it grows past this.
 const LOG_LIMIT_BYTES: u64 = 512 * 1024;
@@ -78,6 +80,20 @@ pub enum Outcome {
     Sent,
     NotOnWhatsApp,
     Failed,
+    /// Stopped before Send was pressed; the message stays waiting.
+    Stopped,
+}
+
+/// Staff pressing Stop, as seen by a running send.
+pub struct Stop<'a> {
+    pub requested: &'a AtomicBool,
+    pub signal: &'a Notify,
+}
+
+impl Stop<'_> {
+    fn is_set(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
 }
 
 fn base_url() -> String {
@@ -181,7 +197,7 @@ async fn ask(
 ) -> Option<Report> {
     let service = app.state::<WhatsAppService>();
     let token = new_token(&service);
-    ask_with(app, window, &token, call, limit).await
+    ask_with(app, window, &token, call, limit, None).await
 }
 
 fn new_token(service: &WhatsAppService) -> String {
@@ -194,6 +210,7 @@ async fn ask_with(
     token: &str,
     call: impl Fn(&str) -> String,
     limit: Duration,
+    stop: Option<&Stop<'_>>,
 ) -> Option<Report> {
     let service = app.state::<WhatsAppService>();
     let token = token.to_string();
@@ -202,15 +219,32 @@ async fn ask_with(
 
     let started = Instant::now();
     let script = call(&token);
+    let mut deadline = limit;
+    let mut cancelling = false;
     let report = loop {
-        if window.eval(&script).is_err() {
+        if !cancelling && window.eval(&script).is_err() {
             break None;
         }
+        let stop_signal = async {
+            match stop {
+                Some(stop) => stop.signal.notified().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             report = &mut receiver => break report.ok(),
             _ = tokio::time::sleep(RETRY_EVERY) => {}
+            _ = stop_signal => {}
         }
-        if started.elapsed() >= limit {
+        if !cancelling && stop.is_some_and(Stop::is_set) {
+            // Ask the page to drop the message; it answers "cancelled", or the result if
+            // it had already pressed Send.
+            cancelling = true;
+            let _ = window.eval(format!("window.__vi && window.__vi.cancel({})", json(&token)));
+            deadline = started.elapsed() + STOP_GRACE;
+        }
+        // A closed window will never answer.
+        if started.elapsed() >= deadline || app.get_webview_window(LABEL).is_none() {
             break None;
         }
     };
@@ -277,9 +311,10 @@ pub async fn ensure_ready(app: &AppHandle) -> Result<()> {
     }
 }
 
-pub async fn send(app: &AppHandle, phone: &str, text: &str) -> Result<Outcome> {
+pub async fn send(app: &AppHandle, phone: &str, text: &str, stop: &Stop<'_>) -> Result<Outcome> {
     let Some(link) = link_phone(phone) else { return Ok(Outcome::NotOnWhatsApp) };
-    let window = window(app)?;
+    // Closing the WhatsApp window stops the batch, so it is never reopened here.
+    let Some(window) = app.get_webview_window(LABEL) else { return Ok(Outcome::Stopped) };
     // Hidden windows can be paused by the system, so it stays visible while sending.
     window.show().map_err(error)?;
 
@@ -306,15 +341,27 @@ pub async fn send(app: &AppHandle, phone: &str, text: &str) -> Result<Outcome> {
             )
         },
         SEND_LIMIT,
+        Some(stop),
     )
     .await;
     let result = report.and_then(|report| report.result);
-    log(app, &format!("[{token}] result: {}", result.as_deref().unwrap_or("no answer from the page")));
+    let closed = app.get_webview_window(LABEL).is_none();
+    let missing = if closed {
+        "window closed"
+    } else if stop.is_set() {
+        "stopped"
+    } else {
+        "no answer from the page"
+    };
+    log(app, &format!("[{token}] result: {}", result.as_deref().unwrap_or(missing)));
     match result.as_deref() {
         // Queued means WhatsApp holds it and sends it as soon as it can, so it is not retried.
         Some("sent" | "queued" | "sent_unconfirmed") => Ok(Outcome::Sent),
         Some("invalid") => Ok(Outcome::NotOnWhatsApp),
         Some("not_ready") => Err(AppError::code("whatsapp_not_connected")),
+        Some("cancelled") => Ok(Outcome::Stopped),
+        // No answer after Stop, or the window was closed: leave the message waiting.
+        _ if stop.is_set() || app.get_webview_window(LABEL).is_none() => Ok(Outcome::Stopped),
         _ => Ok(Outcome::Failed),
     }
 }

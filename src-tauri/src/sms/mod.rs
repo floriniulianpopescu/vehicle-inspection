@@ -315,7 +315,13 @@ async fn send_batch(
 
         previous_start = Some(Instant::now());
         let sent = if message.channel == CHANNEL_WHATSAPP {
-            whatsapp::send(app, &message.phone, &message.text).await? == whatsapp::Outcome::Sent
+            let stop = whatsapp::Stop { requested: &service.stop_requested, signal: &service.stop_signal };
+            match whatsapp::send(app, &message.phone, &message.text, &stop).await? {
+                whatsapp::Outcome::Sent => true,
+                // Not recorded, so it is offered again next time.
+                whatsapp::Outcome::Stopped => break,
+                _ => false,
+            }
         } else {
             let gateway = gateway.ok_or_else(|| AppError::code("sms_not_configured"))?;
             gateway.send(&message.phone, &message.text).await? == gateway::Outcome::Sent

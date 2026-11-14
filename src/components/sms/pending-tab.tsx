@@ -50,6 +50,8 @@ export function PendingTab({ channel }: { channel: Channel }) {
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<Filter>("all");
   const [progress, setProgress] = useState<SendProgress | null>(null);
+  // Stop finishes or drops the message in progress, which can take a few seconds.
+  const [stopping, setStopping] = useState(false);
   const [configured, setConfigured] = useState(true);
   const [days, setDays] = useState<number | null>(null);
   const [intervalText, setIntervalText] = useState(String(MIN_INTERVAL_SECONDS));
@@ -84,7 +86,10 @@ export function PendingTab({ channel }: { channel: Channel }) {
   useEffect(() => {
     const stop = listen<SendProgress>("sms-progress", (event) => {
       setProgress(event.payload);
-      if (!event.payload.active) reload();
+      if (!event.payload.active) {
+        setStopping(false);
+        reload();
+      }
     });
     return () => void stop.then((unlisten) => unlisten());
   }, [reload]);
@@ -181,9 +186,16 @@ export function PendingTab({ channel }: { channel: Channel }) {
               </div>
               <span className="text-xs text-muted-foreground">{text.keepOpen}</span>
             </div>
-            <Button variant="outline" onClick={() => void api.smsStop()}>
+            <Button
+              variant="outline"
+              disabled={stopping}
+              onClick={() => {
+                setStopping(true);
+                void api.smsStop();
+              }}
+            >
               <SquareIcon />
-              {text.stop}
+              {stopping ? text.stopping : text.stop}
             </Button>
           </>
         ) : (
