@@ -17,7 +17,7 @@ export function printReport() {
   // Laid out off screen, unwrapped, to measure how wide each table wants to be.
   root.classList.add("measuring");
   for (const section of root.querySelectorAll<HTMLElement>("[data-print-section]")) {
-    const table = section.querySelector("table");
+    const table = section.querySelector("table.report-table");
     section.dataset.orientation =
       table && table.scrollWidth > PORTRAIT_WIDTH_PX ? "landscape" : "portrait";
   }
@@ -25,13 +25,36 @@ export function printReport() {
   window.print();
 }
 
-/** `lead` goes above the title, on the same page: the report heading for the first list. */
+/**
+ * `lead` goes above the title, on the same page: the report heading.
+ *
+ * The page has no top or bottom margin, so the printer adds no header or footer (page title,
+ * address, date). The empty head and foot of this frame repeat on every page and give the
+ * space back.
+ */
 function Section({ title, lead, children }: { title: string; lead?: ReactNode; children: ReactNode }) {
+  const spacer = (
+    <tr>
+      <td>
+        <div className="page-spacer" />
+      </td>
+    </tr>
+  );
   return (
     <section data-print-section>
-      {lead}
-      <h2>{title}</h2>
-      {children}
+      <table className="page-frame">
+        <thead>{spacer}</thead>
+        <tfoot>{spacer}</tfoot>
+        <tbody>
+          <tr>
+            <td>
+              {lead}
+              <h2>{title}</h2>
+              {children}
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </section>
   );
 }
@@ -39,7 +62,7 @@ function Section({ title, lead, children }: { title: string; lead?: ReactNode; c
 function Table({ headers, rows }: { headers: string[]; rows: ReactNode[][] }) {
   const { t } = useI18n();
   return (
-    <table>
+    <table className="report-table">
       <thead>
         <tr>
           {headers.map((header) => (

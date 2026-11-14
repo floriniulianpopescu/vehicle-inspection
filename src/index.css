@@ -336,7 +336,7 @@
   visibility: hidden;
 }
 
-.report-print.measuring table {
+.report-print.measuring table.report-table {
   width: max-content;
 }
 
@@ -366,26 +366,37 @@
   border-collapse: collapse;
 }
 
-.report-print :is(th, td) {
+.report-print .page-frame,
+.report-print .page-frame > * > tr > td {
+  border: 0;
+  padding: 0;
+}
+
+.report-print .page-spacer {
+  height: 12mm;
+}
+
+.report-print .report-table :is(th, td) {
   border: 0.5pt solid #888;
   padding: 1mm 1.5mm;
   text-align: left;
   vertical-align: top;
 }
 
-.report-print th {
+.report-print .report-table th {
   background: #e8e8e4;
   font-weight: 600;
 }
 
+/* No top or bottom margin: that is where the printer puts its header and footer. */
 @page tall {
   size: A4 portrait;
-  margin: 12mm;
+  margin: 0 12mm;
 }
 
 @page wide {
   size: A4 landscape;
-  margin: 12mm;
+  margin: 0 12mm;
 }
 
 @media print {
