@@ -75,6 +75,7 @@ struct InstalledClient {
 
 impl OAuthClient {
     fn parse(file: &str) -> Option<Self> {
+        let file = file.trim_start_matches('\u{feff}');
         let installed = serde_json::from_str::<ClientFile>(file).ok()?.installed?;
         Some(Self { id: installed.client_id, secret: installed.client_secret })
     }
@@ -324,6 +325,13 @@ mod tests {
             pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
+    }
+
+    #[test]
+    fn a_client_file_saved_by_notepad_still_works() {
+        let file = "\u{feff}{\"installed\":{\"client_id\":\"id\",\"client_secret\":\"secret\"}}";
+        assert_eq!(OAuthClient::parse(file).map(|client| client.id).as_deref(), Some("id"));
+        assert!(OAuthClient::parse("{\"web\":{\"client_id\":\"id\"}}").is_none());
     }
 
     #[test]

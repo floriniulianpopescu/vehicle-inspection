@@ -17,7 +17,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api, errorMessage, type PendingMessage, type SendProgress } from "@/lib/api";
-import { displayDate, fill, todayIso } from "@/lib/format";
+import { displayDate, displayDateTime, fill, todayIso } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import { Input } from "@/components/ui/input";
 import {
@@ -30,12 +30,18 @@ import {
 
 type Filter = "all" | "expiring" | "expired";
 const FILTERS: Filter[] = ["all", "expiring", "expired"];
-/** ITP reminders go by SMS; greetings and feedback by WhatsApp. */
-export type Group = "reminders" | "greetings" | "feedback";
+type StatusFilter = "all" | "unsent" | "failed" | "sent";
+const STATUS_FILTERS: StatusFilter[] = ["all", "unsent", "failed", "sent"];
 
-function groupOf(kind: PendingMessage["kind"]): Group {
-  if (kind === "inspection") return "reminders";
-  if (kind === "feedback") return "feedback";
+/**
+ * The message lists of the Auto SMS page. ITP reminders go by WhatsApp first; whoever
+ * WhatsApp fails then appears in the SMS list. Greetings and feedback go by WhatsApp.
+ */
+export type Group = "remindersWhatsapp" | "remindersSms" | "greetings" | "feedback";
+
+function groupOf(item: PendingMessage): Group {
+  if (item.kind === "inspection") return item.channel === "sms" ? "remindersSms" : "remindersWhatsapp";
+  if (item.kind === "feedback") return "feedback";
   return "greetings";
 }
 
@@ -45,9 +51,15 @@ function matches(item: PendingMessage, filter: Filter, today: string): boolean {
   return filter === "expired" ? item.dueDate < today : item.dueDate >= today;
 }
 
+const STATUS_STYLE: Record<PendingMessage["status"], string> = {
+  unsent: "",
+  sent: "border-emerald-600/40 bg-emerald-500/15 text-emerald-800 dark:text-emerald-200",
+  failed: "border-red-600/40 bg-red-500/15 text-red-800 dark:text-red-200",
+};
+
 /**
- * What the Auto SMS page loads once and shares with its three message tabs: every waiting
- * message, whether the SMS phone is set up, and the progress of the running batch.
+ * What the Auto SMS page loads once and shares with its message tabs: every message of the
+ * current round, whether the SMS phone is set up, and the progress of the running batch.
  */
 export function usePendingMessages() {
   const { t } = useI18n();
@@ -91,18 +103,22 @@ export function usePendingMessages() {
 export type PendingMessages = ReturnType<typeof usePendingMessages>;
 
 /**
- * One kind of waiting message: ITP reminders by SMS, or greetings or feedback by WhatsApp.
- * Each has its own list and Send button; only one batch runs at a time.
+ * One list of messages with its own Send button; only one batch runs at a time. Every message
+ * of the current round is listed with its status, so a failed or already sent one can be sent
+ * again. Sent ones start unticked, so "select all" does not repeat them by accident.
  */
 export function PendingTab({ group, shared }: { group: Group; shared: PendingMessages }) {
   const { t } = useI18n();
   const text = t.sms;
-  const isSms = group === "reminders";
+  const isSms = group === "remindersSms";
+  const isReminder = group === "remindersSms" || group === "remindersWhatsapp";
   const channel = isSms ? "sms" : "whatsapp";
   const { all, reload, progress, configured } = shared;
-  const items = all.filter((item) => groupOf(item.kind) === group);
-  const [skipped, setSkipped] = useState<Set<string>>(new Set());
+  const items = all.filter((item) => groupOf(item) === group);
+  // Ticks the person changed; everything else follows its status.
+  const [overrides, setOverrides] = useState<Map<string, boolean>>(new Map());
   const [filter, setFilter] = useState<Filter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   // Stop finishes or drops the message in progress, which can take a few seconds.
   const [stopping, setStopping] = useState(false);
   const [days, setDays] = useState<number | null>(null);
@@ -111,7 +127,7 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
   const error = ownError ?? shared.error;
 
   useEffect(() => {
-    if (isSms) {
+    if (isReminder) {
       api
         .smsReminderDays()
         .then(setDays)
@@ -121,42 +137,46 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
       .smsIntervalSeconds(channel)
       .then((seconds) => setIntervalText(String(seconds)))
       .catch(() => {});
-  }, [isSms, channel]);
+  }, [isReminder, channel]);
 
   useEffect(() => {
     if (!progress?.active) setStopping(false);
   }, [progress?.active]);
 
+  // After a send the statuses change, so the default ticks apply again.
+  useEffect(() => setOverrides(new Map()), [all]);
+
   const sending = progress?.active ?? false;
-  // Only what the filter shows is selected and sent.
   const today = todayIso();
+  const isChecked = (item: PendingMessage) => overrides.get(item.key) ?? item.status !== "sent";
+  const dueMatching = isReminder ? items.filter((item) => matches(item, filter, today)) : items;
   const counts: Record<Filter, number> = {
     all: items.length,
     expiring: items.filter((item) => matches(item, "expiring", today)).length,
     expired: items.filter((item) => matches(item, "expired", today)).length,
   };
-  const visible = isSms ? items.filter((item) => matches(item, filter, today)) : items;
-  const selected = visible.filter((item) => !skipped.has(item.key));
+  const statusCounts: Record<StatusFilter, number> = {
+    all: dueMatching.length,
+    unsent: dueMatching.filter((item) => item.status === "unsent").length,
+    failed: dueMatching.filter((item) => item.status === "failed").length,
+    sent: dueMatching.filter((item) => item.status === "sent").length,
+  };
+  // Only what the filters show is selected and sent.
+  const visible =
+    statusFilter === "all" ? dueMatching : dueMatching.filter((item) => item.status === statusFilter);
+  const selected = visible.filter(isChecked);
   const allSelected = visible.length > 0 && selected.length === visible.length;
   // Only the drawing is limited; selecting and sending use the whole list.
-  const { shown, hidden, more } = useShowMore(visible, `${filter}|${all.length}`);
+  const { shown, hidden, more } = useShowMore(visible, `${filter}|${statusFilter}|${all.length}`);
 
   function toggle(key: string, checked: boolean) {
-    setSkipped((previous) => {
-      const next = new Set(previous);
-      if (checked) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    setOverrides((previous) => new Map(previous).set(key, checked));
   }
 
   function toggleAll(checked: boolean) {
-    setSkipped((previous) => {
-      const next = new Set(previous);
-      for (const item of visible) {
-        if (checked) next.delete(item.key);
-        else next.add(item.key);
-      }
+    setOverrides((previous) => {
+      const next = new Map(previous);
+      for (const item of visible) next.set(item.key, checked);
       return next;
     });
   }
@@ -172,7 +192,7 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
     }
   }
 
-  // ITP reminders need the SMS phone; greetings go through WhatsApp, checked when sending.
+  // Only the SMS list needs the phone; WhatsApp is checked when sending.
   const needsPhone = isSms && !configured;
 
   // The estimate follows the field as it is typed; below the minimum it counts the minimum.
@@ -203,6 +223,15 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
       setError(errorMessage(t, failure));
     }
   }
+
+  const note =
+    group === "remindersWhatsapp"
+      ? text.remindersWhatsappNote
+      : group === "remindersSms"
+        ? text.remindersSmsNote
+        : group === "feedback"
+          ? text.feedbackNote
+          : null;
 
   return (
     <div className="flex flex-col gap-3">
@@ -274,14 +303,14 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
         )}
       </div>
 
-      {isSms && days !== null && (
+      {isReminder && days !== null && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <DaysInput label={text.reminderDays} value={days} onCommit={changeDays} />
           <span className="text-xs text-muted-foreground">{text.daysHint}</span>
         </div>
       )}
       {needsPhone && <p className="text-sm text-muted-foreground">{text.notConfigured}</p>}
-      {group === "feedback" && <p className="text-sm">{text.feedbackNote}</p>}
+      {note && <p className="text-sm">{note}</p>}
       {!isSms && <p className="text-sm text-muted-foreground">{text.whatsappNote}</p>}
       <FormError message={error} />
       {progress && !progress.active && progress.total > 0 && (
@@ -291,23 +320,40 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
       )}
       {progress?.error && <FormError message={errorMessage(t, progress.error)} />}
 
-      {isSms && (
-        <div role="radiogroup" aria-label={text.filterLabel} className="flex flex-wrap gap-1">
-          {FILTERS.map((value) => (
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        {isReminder && (
+          <div role="radiogroup" aria-label={text.filterLabel} className="flex flex-wrap gap-1">
+            {FILTERS.map((value) => (
+              <Button
+                key={value}
+                role="radio"
+                aria-checked={filter === value}
+                variant={filter === value ? "default" : "outline"}
+                size="sm"
+                onClick={() => setFilter(value)}
+              >
+                {text.filters[value]}
+                <Badge variant="secondary">{counts[value]}</Badge>
+              </Button>
+            ))}
+          </div>
+        )}
+        <div role="radiogroup" aria-label={text.status} className="flex flex-wrap gap-1">
+          {STATUS_FILTERS.map((value) => (
             <Button
               key={value}
               role="radio"
-              aria-checked={filter === value}
-              variant={filter === value ? "default" : "outline"}
+              aria-checked={statusFilter === value}
+              variant={statusFilter === value ? "default" : "outline"}
               size="sm"
-              onClick={() => setFilter(value)}
+              onClick={() => setStatusFilter(value)}
             >
-              {text.filters[value]}
-              <Badge variant="secondary">{counts[value]}</Badge>
+              {text.statusFilters[value]}
+              <Badge variant="secondary">{statusCounts[value]}</Badge>
             </Button>
           ))}
         </div>
-      )}
+      </div>
 
       <Table>
         <TableHeader>
@@ -320,24 +366,35 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
                 onCheckedChange={(checked) => toggleAll(checked === true)}
               />
             </TableHead>
+            <TableHead>{text.status}</TableHead>
             {group === "greetings" && <TableHead>{text.type}</TableHead>}
             <TableHead>{t.data.phone}</TableHead>
             {group !== "greetings" && <TableHead>{t.data.plate}</TableHead>}
-            <TableHead>{isSms ? t.data.nextRevision : t.data.date}</TableHead>
+            <TableHead>{isReminder ? t.data.nextRevision : t.data.date}</TableHead>
             <TableHead>{text.message}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {visible.length === 0 && <EmptyRow columns={5} />}
+          {visible.length === 0 && <EmptyRow columns={6} />}
           {shown.map((item) => (
             <TableRow key={item.key}>
               <TableCell>
                 <Checkbox
                   aria-label={`${text.select} ${item.phone}`}
-                  checked={!skipped.has(item.key)}
+                  checked={isChecked(item)}
                   disabled={sending}
                   onCheckedChange={(checked) => toggle(item.key, checked === true)}
                 />
+              </TableCell>
+              <TableCell>
+                <span className="flex flex-col items-start gap-0.5">
+                  <Badge variant="outline" className={STATUS_STYLE[item.status]}>
+                    {text.statuses[item.status]}
+                  </Badge>
+                  {item.lastAttempt && (
+                    <span className="text-xs text-muted-foreground">{displayDateTime(item.lastAttempt)}</span>
+                  )}
+                </span>
               </TableCell>
               {group === "greetings" && (
                 <TableCell>

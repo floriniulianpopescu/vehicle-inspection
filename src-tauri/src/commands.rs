@@ -234,8 +234,13 @@ pub fn sms_progress(app: AppHandle) -> Result<SendProgress, AppError> {
 }
 
 #[tauri::command]
-pub fn sms_history(db: Db<'_>, page: i64) -> Result<Page<SentMessage>, AppError> {
-    db.with(|conn| sms::history(conn, page))
+pub fn sms_history(
+    db: Db<'_>,
+    page: i64,
+    channel: String,
+    status: Option<String>,
+) -> Result<Page<SentMessage>, AppError> {
+    db.with(|conn| sms::history(conn, page, &channel, status.as_deref()))
 }
 
 #[tauri::command]

@@ -93,10 +93,13 @@
   /** The newest element in the chat, outside any editable field, that shows our text. */
   function shownMessage(panel, snippet) {
     const fields = editables();
+    const holds = (element) => flat(element.textContent).includes(snippet);
+    // WhatsApp splits a message's text into nested pieces (formatting, line breaks, emoji), so
+    // the match is the innermost element holding the text, whatever else it contains.
     const candidates = [...panel.querySelectorAll("span, div")].filter(
       (element) =>
-        element.childElementCount === 0 &&
-        flat(element.textContent).includes(snippet) &&
+        holds(element) &&
+        ![...element.children].some(holds) &&
         !fields.some((field) => field.contains(element)),
     );
     return candidates[candidates.length - 1] || null;
@@ -165,7 +168,9 @@
     // The text is in the chat: WhatsApp has it. A clock means it is queued and goes out as
     // soon as it can.
     if (shownMessage(panel, snippet)) return finish(last === "pending" ? "queued" : "sent_unconfirmed");
-    finish("timeout_after_send");
+    // WhatsApp took the text out of the message box when Send was pressed, so it accepted the
+    // message even though it could not be found in the chat.
+    finish("sent_not_found_in_chat");
   }
 
   /**
@@ -214,6 +219,8 @@
     trace("pressing send on the picture");
     opened.control.click();
     await wait(1500);
+    // The preview closes once WhatsApp takes the picture; if it is still open, nothing went.
+    if (opened.caption.isConnected && document.body.contains(opened.control)) return finish("not_sent");
     // WhatsApp may leave the original text in the message box as a draft; clear it so it is
     // never sent on its own later.
     const leftover = composerWith(expected);

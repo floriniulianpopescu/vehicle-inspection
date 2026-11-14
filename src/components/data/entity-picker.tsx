@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { api, type PickerOption } from "@/lib/api";
 import { fill } from "@/lib/format";
+import { isRomanianPhone } from "@/lib/romanian";
 import { useI18n } from "@/lib/i18n";
 
 /** Digits only, in national form, so "+40 722..." and "0722..." compare equal. */
@@ -90,6 +91,11 @@ export function EntityPicker({
             <Badge key={option.id} variant="secondary">
               {option.label}
               {isNewOption(option) && <span className="opacity-70">({t.data.newClientBadge})</span>}
+              {isNewOption(option) && !isRomanianPhone(option.label) && (
+                <span className="text-amber-700 dark:text-amber-400" title={t.data.phoneWarning}>
+                  ⚠
+                </span>
+              )}
               {multiple && (
                 <button
                   type="button"
@@ -124,7 +130,14 @@ export function EntityPicker({
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-left text-sm font-medium text-primary hover:bg-muted"
           >
             <PlusIcon className="size-4" />
-            {fill(t.data.addPhone, { phone: search.trim() })}
+            <span className="flex flex-col">
+              {fill(t.data.addPhone, { phone: search.trim() })}
+              {!isRomanianPhone(search) && (
+                <span className="text-xs font-normal text-amber-700 dark:text-amber-400">
+                  {t.data.phoneWarning}
+                </span>
+              )}
+            </span>
           </button>
         )}
         {options.length === 0 && !canAdd && (

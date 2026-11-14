@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { EntityPicker } from "@/components/data/entity-picker";
-import { Field, FormError } from "@/components/data/field";
+import { Field, FormError, FormWarning } from "@/components/data/field";
+import { isRomanianPhone } from "@/lib/romanian";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -54,6 +55,7 @@ export function ClientDialog({
         <form onSubmit={submit} className="flex flex-col gap-4">
           <Field label={t.data.phone}>
             <Input value={phone} onChange={(event) => setPhone(event.target.value)} required autoFocus />
+            <FormWarning message={phone.trim() !== "" && !isRomanianPhone(phone) && t.data.phoneWarning} />
           </Field>
           <EntityPicker
             kind="car"

@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { AutocompleteInput } from "@/components/autocomplete-input";
 import { EntityPicker, isNewOption } from "@/components/data/entity-picker";
-import { Field, FormError } from "@/components/data/field";
+import { Field, FormError, FormWarning } from "@/components/data/field";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { api, errorMessage, type Car, type Frequency, type PickerOption } from "@/lib/api";
 import { suggestManufacturers, suggestModels } from "@/lib/car-models";
+import { isRomanianPlate } from "@/lib/romanian";
 import { displayDate, parseDate, todayIso } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 
@@ -131,6 +132,7 @@ export function CarDialog({
         <form onSubmit={submit} className="flex flex-col gap-4">
           <Field label={t.data.plate}>
             <Input value={plate} onChange={(event) => setPlate(event.target.value)} required autoFocus />
+            <FormWarning message={plate.trim() !== "" && !isRomanianPlate(plate) && t.data.plateWarning} />
           </Field>
           <div className="grid grid-cols-2 gap-4">
             <Field label={t.data.model}>

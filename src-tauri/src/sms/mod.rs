@@ -18,7 +18,7 @@ use crate::backup::secrets::Secret;
 use crate::data::AppError;
 use crate::db::Database;
 use gateway::Gateway;
-use pending::{CHANNEL_WHATSAPP, KIND_INSPECTION};
+use pending::{CHANNEL_SMS, CHANNEL_WHATSAPP};
 use crate::whatsapp;
 pub use pending::{
     MessageImage, PendingMessage, SentMessage, Template, history, remove_template_image, save_template,
@@ -245,6 +245,11 @@ fn update_progress(app: &AppHandle, change: impl FnOnce(&mut SendProgress)) -> R
     Ok(())
 }
 
+/// The channel a pending message's key goes through: only reminders marked for SMS use SMS.
+fn channel_of_key(key: &str) -> &'static str {
+    if key.starts_with(&format!("inspection:{CHANNEL_SMS}:")) { CHANNEL_SMS } else { CHANNEL_WHATSAPP }
+}
+
 /// Starts sending in the background and returns immediately.
 pub async fn start_sending(app: &AppHandle, keys: Vec<String>, interval_seconds: u64) -> Result<()> {
     if !(MIN_INTERVAL_SECONDS..=MAX_INTERVAL_SECONDS).contains(&interval_seconds) {
@@ -254,24 +259,24 @@ pub async fn start_sending(app: &AppHandle, keys: Vec<String>, interval_seconds:
         return Ok(());
     }
     // Each channel is checked only if the batch uses it.
-    let inspection_prefix = format!("{KIND_INSPECTION}:");
+    let by_sms = |key: &String| channel_of_key(key) == CHANNEL_SMS;
     // Remembered per channel as the starting value for the next send.
     let service = app.state::<SmsService>();
     let mut next = service.stored()?;
-    if keys.iter().all(|key| key.starts_with(&inspection_prefix)) {
+    if keys.iter().all(by_sms) {
         next.interval_seconds = interval_seconds;
     } else {
         next.whatsapp_interval_seconds = interval_seconds;
     }
     service.store(next)?;
-    let gateway = if keys.iter().any(|key| key.starts_with(&inspection_prefix)) {
+    let gateway = if keys.iter().any(by_sms) {
         let gateway = open_gateway(app).await?;
         gateway.check().await?;
         Some(gateway)
     } else {
         None
     };
-    if keys.iter().any(|key| !key.starts_with(&inspection_prefix)) {
+    if keys.iter().any(|key| !by_sms(key)) {
         whatsapp::ensure_ready(app).await?;
     }
     app.state::<SmsService>().begin(keys.len())?;

@@ -397,7 +397,7 @@ pub async fn send(
     log(app, &format!("[{token}] result: {}", result.as_deref().unwrap_or(missing)));
     match result.as_deref() {
         // Queued means WhatsApp holds it and sends it as soon as it can, so it is not retried.
-        Some("sent" | "queued" | "sent_unconfirmed") => Ok(Outcome::Sent),
+        Some("sent" | "queued" | "sent_unconfirmed" | "sent_not_found_in_chat") => Ok(Outcome::Sent),
         Some("invalid") => Ok(Outcome::NotOnWhatsApp),
         Some("not_ready") => Err(AppError::code("whatsapp_not_connected")),
         Some("cancelled") => Ok(Outcome::Stopped),

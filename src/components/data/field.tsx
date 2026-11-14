@@ -11,6 +11,16 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
+/** A small yellow note that does not stop saving, e.g. a plate in an unusual format. */
+export function FormWarning({ message }: { message: string | null | false }) {
+  if (!message) return null;
+  return (
+    <span role="status" className="text-xs font-normal text-amber-700 dark:text-amber-400">
+      {message}
+    </span>
+  );
+}
+
 export function FormError({ message }: { message: string | null }) {
   if (!message) return null;
   return (

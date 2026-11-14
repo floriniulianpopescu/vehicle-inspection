@@ -197,10 +197,14 @@ export type PendingMessage = {
   text: string;
   /** The greeting has a picture to send with it. */
   hasImage: boolean;
+  /** The last attempt in this round; sent ones can be sent again. */
+  status: "unsent" | "sent" | "failed";
+  lastAttempt: string | null;
 };
 export type SentMessage = {
   messageId: number;
   kind: SmsKind;
+  channel: "sms" | "whatsapp";
   phone: string;
   plate: string | null;
   text: string;
@@ -242,7 +246,8 @@ export const api = {
     invoke<number>("sms_interval_seconds", { channel }),
   smsStop: () => invoke<void>("sms_stop"),
   smsProgress: () => invoke<SendProgress>("sms_progress"),
-  smsHistory: (page: number) => invoke<Page<SentMessage>>("sms_history", { page }),
+  smsHistory: (page: number, channel: "sms" | "whatsapp", status: "sent" | "failed" | null) =>
+    invoke<Page<SentMessage>>("sms_history", { page, channel, status }),
   smsTemplates: () => invoke<SmsTemplate[]>("sms_templates"),
   smsSaveTemplate: (template: SmsTemplate) =>
     invoke<void>("sms_save_template", { template: { kind: template.kind, text: template.text } }),
