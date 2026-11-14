@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "seed:demo": "bun scripts/seed-demo.ts"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
