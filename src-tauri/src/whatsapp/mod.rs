@@ -8,9 +8,11 @@
 //! back by setting the page title to a marker followed by JSON, which the app watches for.
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -28,6 +30,9 @@ const READY_LIMIT: Duration = Duration::from_secs(45);
 /// Opening the chat, sending and waiting for WhatsApp to confirm.
 const SEND_LIMIT: Duration = Duration::from_secs(120);
 const RETRY_EVERY: Duration = Duration::from_secs(1);
+const LOG_FILE: &str = "whatsapp-log.txt";
+/// The log is started over once it grows past this.
+const LOG_LIMIT_BYTES: u64 = 512 * 1024;
 /// WhatsApp Web refuses browsers it does not recognise; on Windows the engine is Edge already.
 #[cfg(not(windows))]
 const CHROME_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
@@ -47,6 +52,10 @@ pub struct WhatsAppService {
 #[derive(Deserialize, Debug)]
 struct Report {
     token: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    stage: Option<String>,
     #[serde(default)]
     state: Option<String>,
     #[serde(default)]
@@ -92,9 +101,49 @@ pub fn link_phone(phone: &str) -> Option<String> {
     digits.chars().all(|c| c.is_ascii_digit()).then_some(digits)
 }
 
+/// Each send's steps, so a failure on the client's PC can be traced afterwards.
+fn log(app: &AppHandle, line: &str) {
+    let Ok(directory) = app.path().app_data_dir() else { return };
+    let path = directory.join(LOG_FILE);
+    if fs::metadata(&path).is_ok_and(|meta| meta.len() > LOG_LIMIT_BYTES) {
+        let _ = fs::rename(&path, directory.join(format!("{LOG_FILE}.old")));
+    }
+    let stamp = utc_now();
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{stamp}  {line}");
+    }
+}
+
+/// The current time as "2026-12-24 10:31:36 UTC".
+fn utc_now() -> String {
+    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    // Civil date from days since 1970 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
 fn deliver(app: &AppHandle, title: &str) {
     let Some(json) = title.strip_prefix(TITLE_MARKER) else { return };
     let Ok(report) = serde_json::from_str::<Report>(json) else { return };
+    // Progress notes are only logged; the caller waits for the final result.
+    if report.kind.as_deref() == Some("trace") {
+        log(app, &format!("[{}] {}", report.token, report.stage.as_deref().unwrap_or("")));
+        return;
+    }
     let service = app.state::<WhatsAppService>();
     let sender = service.waiting.lock().ok().and_then(|mut waiting| waiting.remove(&report.token));
     if let Some(sender) = sender {
@@ -131,7 +180,23 @@ async fn ask(
     limit: Duration,
 ) -> Option<Report> {
     let service = app.state::<WhatsAppService>();
-    let token = format!("t{}", service.next_token.fetch_add(1, Ordering::SeqCst));
+    let token = new_token(&service);
+    ask_with(app, window, &token, call, limit).await
+}
+
+fn new_token(service: &WhatsAppService) -> String {
+    format!("t{}", service.next_token.fetch_add(1, Ordering::SeqCst))
+}
+
+async fn ask_with(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    token: &str,
+    call: impl Fn(&str) -> String,
+    limit: Duration,
+) -> Option<Report> {
+    let service = app.state::<WhatsAppService>();
+    let token = token.to_string();
     let (sender, mut receiver) = oneshot::channel();
     service.waiting.lock().ok()?.insert(token.clone(), sender);
 
@@ -220,25 +285,34 @@ pub async fn send(app: &AppHandle, phone: &str, text: &str) -> Result<Outcome> {
 
     let mut url: Url = format!("{}/send", base_url()).parse().map_err(error)?;
     url.query_pairs_mut().append_pair("phone", &link).append_pair("text", text);
+    // Only a page that started loading after this moment may press Send, so a slow older
+    // page still showing the previous client's chat can never send to the wrong person.
+    let navigated_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |elapsed| elapsed.as_millis() as f64);
     window.navigate(url).map_err(error)?;
 
-    let report = ask(
+    let token = new_token(&app.state::<WhatsAppService>());
+    log(app, &format!("[{token}] sending to +{link}"));
+    let report = ask_with(
         app,
         &window,
+        &token,
         |token| {
             format!(
-                "window.__vi && window.__vi.send({}, {}, {})",
+                "window.__vi && window.__vi.send({}, {}, {navigated_at})",
                 json(token),
-                json(&link),
                 json(text)
             )
         },
         SEND_LIMIT,
     )
     .await;
-    match report.and_then(|report| report.result).as_deref() {
+    let result = report.and_then(|report| report.result);
+    log(app, &format!("[{token}] result: {}", result.as_deref().unwrap_or("no answer from the page")));
+    match result.as_deref() {
         // Queued means WhatsApp holds it and sends it as soon as it can, so it is not retried.
-        Some("sent" | "queued") => Ok(Outcome::Sent),
+        Some("sent" | "queued" | "sent_unconfirmed") => Ok(Outcome::Sent),
         Some("invalid") => Ok(Outcome::NotOnWhatsApp),
         Some("not_ready") => Err(AppError::code("whatsapp_not_connected")),
         _ => Ok(Outcome::Failed),
