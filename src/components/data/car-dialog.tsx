@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -23,9 +24,17 @@ import { suggestManufacturers, suggestModels } from "@/lib/car-models";
 import { displayDate, parseDate, todayIso } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 
-export const FREQUENCIES: Frequency[] = [6, 12, 24];
+export const FREQUENCIES: Frequency[] = [6, 12, 24, 36];
 
 const UNKNOWN = "unknown";
+/** Typed in Last inspection when there is no valid one, e.g. the car failed its ITP. */
+const NO_DATE = "-";
+
+/** Empty or "-" means no last inspection: the car is saved with an unknown state. */
+function hasNoDate(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed === "" || trimmed === NO_DATE;
+}
 
 /**
  * The last inspection date saved in this session. A new car starts with it, or with today
@@ -52,6 +61,7 @@ export function CarDialog({
   });
   const [frequency, setFrequency] = useState<Frequency | null>(car?.revisionFrequency ?? null);
   const [clients, setClients] = useState(car?.clients ?? []);
+  const [notes, setNotes] = useState(car?.notes ?? "");
   // A car already inspected by someone unrecorded keeps "unknown" until a new date is entered.
   const [inspectedBy, setInspectedBy] = useState(
     car?.inspectedBy != null ? String(car.inspectedBy) : car?.lastRevision ? UNKNOWN : "",
@@ -77,8 +87,8 @@ export function CarDialog({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const revision = lastRevision.trim() ? parseDate(lastRevision) : null;
-    if (lastRevision.trim() && !revision) {
+    const revision = hasNoDate(lastRevision) ? null : parseDate(lastRevision);
+    if (!hasNoDate(lastRevision) && !revision) {
       setError(t.data.errors.invalid_date);
       return;
     }
@@ -99,6 +109,7 @@ export function CarDialog({
         model,
         lastRevision: revision,
         revisionFrequency: frequency,
+        notes,
         clientIds: clients.filter((client) => !isNewOption(client)).map((client) => client.id),
         newPhones: clients.filter(isNewOption).map((client) => client.label),
         inspectedBy: revision && bringer && !isNewOption(bringer) ? bringer.id : null,
@@ -162,13 +173,15 @@ export function CarDialog({
             <Field label={t.data.lastRevision}>
               <Input
                 value={lastRevision}
-                placeholder={t.data.dateFormat}
+                placeholder={`${t.data.dateFormat} / ${NO_DATE}`}
                 onChange={(event) => changeLastRevision(event.target.value)}
               />
+              {/* Always shown, so the form never shifts while typing. */}
+              <span className="text-xs font-normal text-muted-foreground">{t.data.noDateHint}</span>
             </Field>
             <div role="radiogroup" aria-label={t.data.frequency} className="flex flex-col gap-1.5">
               <span className="text-sm leading-none font-medium">{t.data.frequency}</span>
-              <div className="grid grid-cols-3 gap-1">
+              <div className="grid grid-cols-4 gap-1">
                 {FREQUENCIES.map((months) => (
                   <Button
                     key={months}
@@ -184,7 +197,7 @@ export function CarDialog({
               </div>
             </div>
           </div>
-          {lastRevision.trim() && (
+          {!hasNoDate(lastRevision) && (
             <Field label={t.data.inspectedBy}>
               <Select value={broughtBy} onValueChange={setInspectedBy}>
                 <SelectTrigger className="w-full">
@@ -202,6 +215,14 @@ export function CarDialog({
               <p className="text-xs font-normal text-muted-foreground">{t.data.inspectedByHint}</p>
             </Field>
           )}
+          <Field label={t.data.notes}>
+            <Textarea
+              value={notes}
+              rows={2}
+              placeholder={t.data.modelOptional}
+              onChange={(event) => setNotes(event.target.value)}
+            />
+          </Field>
           <FormError message={error} />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { SendIcon, SquareIcon } from "lucide-react";
+import { ImageIcon, SendIcon, SquareIcon } from "lucide-react";
 import { DaysInput } from "@/components/days-input";
 import { FormError } from "@/components/data/field";
 import { EmptyRow } from "@/components/data/table-parts";
@@ -29,7 +29,14 @@ import {
 
 type Filter = "all" | "expiring" | "expired";
 const FILTERS: Filter[] = ["all", "expiring", "expired"];
-export type Channel = PendingMessage["channel"];
+/** ITP reminders go by SMS; greetings and feedback by WhatsApp. */
+export type Group = "reminders" | "greetings" | "feedback";
+
+function groupOf(kind: PendingMessage["kind"]): Group {
+  if (kind === "inspection") return "reminders";
+  if (kind === "feedback") return "feedback";
+  return "greetings";
+}
 
 /** Expired means the ITP date has passed. */
 function matches(item: PendingMessage, filter: Filter, today: string): boolean {
@@ -38,15 +45,16 @@ function matches(item: PendingMessage, filter: Filter, today: string): boolean {
 }
 
 /**
- * Messages waiting for one channel: ITP reminders by SMS, or greetings by WhatsApp. Each
- * channel has its own list, pause and Send button; only one batch runs at a time.
+ * One kind of waiting message: ITP reminders by SMS, or greetings or feedback by WhatsApp.
+ * Each has its own list and Send button; only one batch runs at a time.
  */
-export function PendingTab({ channel }: { channel: Channel }) {
+export function PendingTab({ group }: { group: Group }) {
   const { t } = useI18n();
   const text = t.sms;
-  const isSms = channel === "sms";
+  const isSms = group === "reminders";
+  const channel = isSms ? "sms" : "whatsapp";
   const [all, setAll] = useState<PendingMessage[]>([]);
-  const items = all.filter((item) => item.channel === channel);
+  const items = all.filter((item) => groupOf(item.kind) === group);
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<Filter>("all");
   const [progress, setProgress] = useState<SendProgress | null>(null);
@@ -246,6 +254,7 @@ export function PendingTab({ channel }: { channel: Channel }) {
         </div>
       )}
       {needsPhone && <p className="text-sm text-muted-foreground">{text.notConfigured}</p>}
+      {group === "feedback" && <p className="text-sm">{text.feedbackNote}</p>}
       {!isSms && <p className="text-sm text-muted-foreground">{text.whatsappNote}</p>}
       <FormError message={error} />
       {progress && !progress.active && progress.total > 0 && (
@@ -284,9 +293,9 @@ export function PendingTab({ channel }: { channel: Channel }) {
                 onCheckedChange={(checked) => toggleAll(checked === true)}
               />
             </TableHead>
-            {!isSms && <TableHead>{text.type}</TableHead>}
+            {group === "greetings" && <TableHead>{text.type}</TableHead>}
             <TableHead>{t.data.phone}</TableHead>
-            {isSms && <TableHead>{t.data.plate}</TableHead>}
+            {group !== "greetings" && <TableHead>{t.data.plate}</TableHead>}
             <TableHead>{isSms ? t.data.nextRevision : t.data.date}</TableHead>
             <TableHead>{text.message}</TableHead>
           </TableRow>
@@ -303,13 +312,20 @@ export function PendingTab({ channel }: { channel: Channel }) {
                   onCheckedChange={(checked) => toggle(item.key, checked === true)}
                 />
               </TableCell>
-              {!isSms && (
+              {group === "greetings" && (
                 <TableCell>
-                  <Badge variant="secondary">{text.kinds[item.kind]}</Badge>
+                  <span className="flex items-center gap-1.5">
+                    <Badge variant="secondary">{text.kinds[item.kind]}</Badge>
+                    {item.hasImage && (
+                      <ImageIcon className="size-4 text-muted-foreground" aria-label={text.withImage} />
+                    )}
+                  </span>
                 </TableCell>
               )}
               <TableCell>{item.phone}</TableCell>
-              {isSms && <TableCell className="font-medium">{item.plate ?? "-"}</TableCell>}
+              {group !== "greetings" && (
+                <TableCell className="font-medium">{item.plate ?? "-"}</TableCell>
+              )}
               <TableCell>{displayDate(item.dueDate)}</TableCell>
               <TableCell className="whitespace-normal">{item.text}</TableCell>
             </TableRow>

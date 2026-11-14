@@ -14,6 +14,10 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_auto_sms.sql"),
     include_str!("../migrations/003_inspections.sql"),
+    include_str!("../migrations/004_three_year_frequency.sql"),
+    include_str!("../migrations/005_car_notes.sql"),
+    include_str!("../migrations/006_feedback_messages.sql"),
+    include_str!("../migrations/007_greeting_images.sql"),
 ];
 
 pub struct Database {
@@ -171,9 +175,32 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         ));
     }
 
+    if current == MIGRATIONS.len() {
+        return Ok(());
+    }
+
+    // Rebuilding a table means dropping the old one, which with foreign keys on would delete
+    // every row linked to it. SQLite's documented procedure is to switch them off (outside a
+    // transaction), migrate, check nothing dangles, then switch them back on.
+    let foreign_keys: bool = conn
+        .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "foreign_keys", false).map_err(|e| e.to_string())?;
+    let result = run_migrations(conn, current);
+    conn.pragma_update(None, "foreign_keys", foreign_keys).map_err(|e| e.to_string())?;
+    result
+}
+
+fn run_migrations(conn: &mut Connection, current: usize) -> Result<(), String> {
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(current) {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute_batch(sql).map_err(|e| e.to_string())?;
+        let dangling: i64 = tx
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if dangling > 0 {
+            return Err(format!("Migration {} would leave {dangling} broken links", index + 1));
+        }
         tx.pragma_update(None, "user_version", (index + 1) as u32)
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -383,7 +410,7 @@ mod tests {
     #[test]
     fn revision_frequency_is_limited() {
         let conn = database();
-        for months in [6, 12, 24] {
+        for months in [6, 12, 24, 36] {
             add_car(&conn, &format!("B{months}ABC"), months).unwrap();
         }
         assert!(add_car(&conn, "B18ABC", 18).is_err());
@@ -433,6 +460,52 @@ mod tests {
         let client: Option<i64> =
             conn.query_row("SELECT ClientID FROM inspections", [], |r| r.get(0)).unwrap();
         assert_eq!(client, None);
+    }
+
+    #[test]
+    fn adding_three_years_keeps_every_link_and_still_enforces_them() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        for sql in &MIGRATIONS[..3] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute_batch(
+            "INSERT INTO clients (Phone) VALUES ('0722000001');
+             INSERT INTO cars (Plate, Manufacturer, Model, LastRevision, RevisionFrequency)
+                 VALUES ('B1AAA', 'Dacia', 'Logan', '2025-05-01', 24);
+             INSERT INTO carsclients (CarID, ClientID) VALUES (1, 1);
+             INSERT INTO inspections (CarID, ClientID, Date) VALUES (1, 1, '2025-05-01');
+             INSERT INTO messages (ClientID, CarID, Type, Text, SentAt, Status)
+                 VALUES (1, 1, 'inspection', 'x', '2026-01-01T10:00:00', 'sent');",
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        for table in ["cars", "carsclients", "inspections", "messages"] {
+            assert_eq!(count(&conn, table), 1, "{table}");
+        }
+        // Later migrations rebuild the message tables too, keeping the texts and adding feedback.
+        assert_eq!(count(&conn, "sms_templates"), 5);
+        conn.execute(
+            "INSERT INTO messages (ClientID, CarID, Type, Text, SentAt, Status)
+             VALUES (1, 1, 'feedback', 'x', '2026-01-01T10:00:00', 'sent')",
+            [],
+        )
+        .unwrap();
+        assert!(add_car(&conn, "B36ABC", 36).is_ok());
+        assert!(add_car(&conn, "B48ABC", 48).is_err());
+        // Foreign keys are back on: deleting the car still removes what belongs to it.
+        conn.execute("DELETE FROM cars WHERE CarID = 1", []).unwrap();
+        for table in ["carsclients", "inspections", "messages"] {
+            assert_eq!(count(&conn, table), 0, "{table}");
+        }
+        // Deleting a client still removes their messages after the rebuild.
+        conn.execute("INSERT INTO messages (ClientID, Type, Text, SentAt, Status)
+                      VALUES (1, 'christmas', 'x', '2026-12-24T10:00:00', 'sent')", []).unwrap();
+        conn.execute("DELETE FROM clients WHERE ClientID = 1", []).unwrap();
+        assert_eq!(count(&conn, "messages"), 0);
     }
 
     #[test]

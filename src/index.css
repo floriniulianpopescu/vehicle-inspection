@@ -70,6 +70,14 @@
     --ring: oklch(0.66 0.14 232);
     --viz-series: #2a78d6;
     --viz-alert: #d03b3b;
+    /* Categorical slots for pie slices, in fixed order; checked against the card colour. */
+    --viz-cat-1: #2a78d6;
+    --viz-cat-2: #eb6834;
+    --viz-cat-3: #1baf7a;
+    --viz-cat-4: #eda100;
+    --viz-cat-5: #e87ba4;
+    --viz-cat-6: #008300;
+    --viz-other: #b5b3ad;
     --chart-1: oklch(0.81 0.1 228);
     --chart-2: oklch(0.62 0.14 238);
     --chart-3: oklch(0.5 0.14 245);
@@ -120,6 +128,13 @@
     --ring: oklch(0.68 0.13 232);
     --viz-series: #3987e5;
     --viz-alert: #d03b3b;
+    --viz-cat-1: #3987e5;
+    --viz-cat-2: #d95926;
+    --viz-cat-3: #199e70;
+    --viz-cat-4: #c98500;
+    --viz-cat-5: #d55181;
+    --viz-cat-6: #0ca30c;
+    --viz-other: #6b6a66;
     --chart-1: oklch(0.81 0.1 228);
     --chart-2: oklch(0.67 0.13 236);
     --chart-3: oklch(0.56 0.14 243);
@@ -300,4 +315,115 @@
   background-color: color-mix(in oklch, var(--primary) 16%, transparent);
   background-image: linear-gradient(to bottom, var(--gloss-mid), transparent);
   box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 35%, transparent);
+}
+
+/*
+ * The printed report. Hidden on screen; when printing, only it is shown. Each list chooses its
+ * own page orientation (see printReport), using the two named pages below.
+ */
+.report-print {
+  display: none;
+  color: #000;
+  background: #fff;
+  font: 9pt/1.3 'Geist Variable', sans-serif;
+}
+
+.report-print.measuring {
+  display: block;
+  position: fixed;
+  top: 0;
+  left: -100000px;
+  visibility: hidden;
+}
+
+.report-print.measuring table {
+  width: max-content;
+}
+
+.report-print.measuring :is(th, td) {
+  white-space: nowrap;
+}
+
+.report-print h1 {
+  margin: 0 0 2mm;
+  font-size: 14pt;
+  font-weight: 600;
+}
+
+.report-print h2 {
+  margin: 4mm 0 2mm;
+  font-size: 11pt;
+  font-weight: 600;
+}
+
+.report-print header p {
+  margin: 0;
+  color: #444;
+}
+
+.report-print table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.report-print :is(th, td) {
+  border: 0.5pt solid #888;
+  padding: 1mm 1.5mm;
+  text-align: left;
+  vertical-align: top;
+}
+
+.report-print th {
+  background: #e8e8e4;
+  font-weight: 600;
+}
+
+@page tall {
+  size: A4 portrait;
+  margin: 12mm;
+}
+
+@page wide {
+  size: A4 landscape;
+  margin: 12mm;
+}
+
+@media print {
+  #root,
+  [data-sonner-toaster] {
+    display: none !important;
+  }
+
+  html,
+  body {
+    background: #fff !important;
+  }
+
+  .report-print {
+    display: block;
+  }
+
+  .report-print section[data-orientation="portrait"] {
+    page: tall;
+  }
+
+  .report-print section[data-orientation="landscape"] {
+    page: wide;
+  }
+
+  /*
+   * Lists follow one another to save paper. A list whose orientation differs from the one
+   * before starts a new page by itself, because it uses the other named page.
+   */
+  .report-print h2 {
+    break-after: avoid;
+  }
+
+  .report-print thead {
+    display: table-header-group;
+  }
+
+  .report-print tr {
+    break-inside: avoid;
+  }
 }

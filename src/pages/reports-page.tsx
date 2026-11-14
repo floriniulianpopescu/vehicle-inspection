@@ -1,18 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
-import { DownloadIcon } from "lucide-react";
+import { DownloadIcon, PrinterIcon } from "lucide-react";
+import { FREQUENCIES } from "@/components/data/car-dialog";
 import { toast } from "sonner";
 import { DaysInput } from "@/components/days-input";
 import { FormError } from "@/components/data/field";
 import { DateRangePicker } from "@/components/date-range-picker";
 import { DueTab, InspectedTab, RepeatTab } from "@/components/reports/report-tabs";
+import { printReport, ReportPrint } from "@/components/reports/report-print";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   api,
   errorMessage,
   MAX_EXPIRING_DAYS,
+  type Frequency,
   type Report,
   type ReportExportLabels,
   type ReportRequest,
@@ -68,6 +78,8 @@ export function ReportsPage() {
   const [fromText, setFromText] = useState(displayDate(initial.from));
   const [toText, setToText] = useState(displayDate(initial.to));
   const [days, setDays] = useState(storedDays);
+  // Applies to every report and to the export.
+  const [frequency, setFrequency] = useState("all");
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -79,8 +91,15 @@ export function ReportsPage() {
   }, [fromText, toText]);
 
   const request = useMemo<ReportRequest | null>(
-    () => (range ? { ...range, expiringDays: days } : null),
-    [range, days],
+    () =>
+      range
+        ? {
+            ...range,
+            expiringDays: days,
+            frequency: frequency === "all" ? null : (Number(frequency) as Frequency),
+          }
+        : null,
+    [range, days, frequency],
   );
 
   useEffect(() => {
@@ -188,7 +207,24 @@ export function ReportsPage() {
                 {text.tabs.repeat} {count(report.repeatCars.length + report.repeatClients.length)}
               </TabsTrigger>
             </TabsList>
-            <Button className="ml-auto" disabled={!request || exporting} onClick={exportFile}>
+            <Select value={frequency} onValueChange={setFrequency}>
+              <SelectTrigger className="ml-auto w-44" aria-label={t.data.frequency}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{t.data.filters.allFrequencies}</SelectItem>
+                {FREQUENCIES.map((months) => (
+                  <SelectItem key={months} value={String(months)}>
+                    {t.data.months[months]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button variant="outline" disabled={!request} onClick={printReport}>
+              <PrinterIcon />
+              {text.print}
+            </Button>
+            <Button disabled={!request || exporting} onClick={exportFile}>
               <DownloadIcon />
               {exporting ? text.exporting : text.export}
             </Button>
@@ -212,6 +248,7 @@ export function ReportsPage() {
           </TabsContent>
         </Tabs>
       )}
+      {report && request && <ReportPrint report={report} request={request} />}
     </div>
   );
 }

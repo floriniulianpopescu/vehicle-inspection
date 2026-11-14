@@ -1,5 +1,6 @@
 mod backup;
 mod commands;
+mod dashboard;
 mod data;
 mod db;
 mod reports;
@@ -67,10 +68,15 @@ pub fn run() {
             commands::delete_client,
             commands::delete_car,
             commands::report,
+            commands::dashboard_series,
+            commands::dashboard_summary,
+            commands::dashboard_manufacturers,
             commands::sms_reminder_days,
             commands::sms_set_reminder_days,
             commands::sms_interval_seconds,
             commands::sms_pending,
+            commands::sms_save_template_image,
+            commands::sms_remove_template_image,
             commands::whatsapp_status,
             commands::whatsapp_open,
             commands::whatsapp_log_out,

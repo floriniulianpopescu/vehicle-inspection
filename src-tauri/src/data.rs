@@ -89,6 +89,8 @@ pub struct Car {
     model: String,
     last_revision: Option<String>,
     revision_frequency: i64,
+    /// "Other information", empty when not filled in.
+    notes: String,
     next_revision: Option<String>,
     revision_state: String,
     /// The client who brought the car to its last inspection, when known.
@@ -138,6 +140,8 @@ pub struct CarInput {
     model: String,
     last_revision: Option<String>,
     revision_frequency: i64,
+    #[serde(default)]
+    notes: String,
     client_ids: Vec<i64>,
     /// Who brought the car to the inspection on `last_revision`.
     #[serde(default)]
@@ -354,6 +358,7 @@ pub fn list_cars(conn: &Connection, input: CarFilter) -> Result<Page<Car>> {
             like("c.Plate"),
             like("c.Manufacturer"),
             like("c.Model"),
+            like("c.Notes"),
             format!(
                 "EXISTS (SELECT 1 FROM carsclients l JOIN clients cl ON cl.ClientID = l.ClientID
                  WHERE l.CarID = c.CarID AND {})",
@@ -383,7 +388,8 @@ pub fn list_cars(conn: &Connection, input: CarFilter) -> Result<Page<Car>> {
     let select = format!(
         "SELECT c.CarID, c.Plate, c.Manufacturer, c.Model, c.LastRevision, c.RevisionFrequency,
                 {NEXT_REVISION}, {state},
-                (SELECT i.ClientID FROM inspections i WHERE i.CarID = c.CarID AND i.Date = c.LastRevision)
+                (SELECT i.ClientID FROM inspections i WHERE i.CarID = c.CarID AND i.Date = c.LastRevision),
+                c.Notes
          FROM cars c"
     );
     let mut rows = filter.rows(conn, &select, order, input.page, |r| {
@@ -397,6 +403,7 @@ pub fn list_cars(conn: &Connection, input: CarFilter) -> Result<Page<Car>> {
             next_revision: r.get(6)?,
             revision_state: r.get(7)?,
             inspected_by: r.get(8)?,
+            notes: r.get(9)?,
             clients: Vec::new(),
         })
     })?;
@@ -493,7 +500,8 @@ pub fn save_car(conn: &mut Connection, input: CarInput) -> Result<PickerOption> 
     if manufacturer.is_empty() {
         return Err(AppError::code("required_fields"));
     }
-    if ![6, 12, 24].contains(&input.revision_frequency) {
+    let notes = input.notes.trim();
+    if ![6, 12, 24, 36].contains(&input.revision_frequency) {
         return Err(AppError::code("required_fields"));
     }
     validate_last_revision(conn, input.last_revision.as_deref())?;
@@ -525,8 +533,16 @@ pub fn save_car(conn: &mut Connection, input: CarInput) -> Result<PickerOption> 
             let changed = tx
                 .execute(
                     "UPDATE cars SET Plate = ?1, Manufacturer = ?2, Model = ?3, LastRevision = ?4,
-                     RevisionFrequency = ?5 WHERE CarID = ?6",
-                    params![plate, manufacturer, model, input.last_revision, input.revision_frequency, id],
+                     RevisionFrequency = ?5, Notes = ?6 WHERE CarID = ?7",
+                    params![
+                        plate,
+                        manufacturer,
+                        model,
+                        input.last_revision,
+                        input.revision_frequency,
+                        notes,
+                        id
+                    ],
                 )
                 .map_err(duplicate_as("plate_exists"))?;
             require_changed(changed)?;
@@ -534,9 +550,9 @@ pub fn save_car(conn: &mut Connection, input: CarInput) -> Result<PickerOption> 
         }
         None => {
             tx.execute(
-                "INSERT INTO cars (Plate, Manufacturer, Model, LastRevision, RevisionFrequency)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![plate, manufacturer, model, input.last_revision, input.revision_frequency],
+                "INSERT INTO cars (Plate, Manufacturer, Model, LastRevision, RevisionFrequency, Notes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![plate, manufacturer, model, input.last_revision, input.revision_frequency, notes],
             )
             .map_err(duplicate_as("plate_exists"))?;
             tx.last_insert_rowid()
@@ -669,6 +685,7 @@ mod tests {
             revision_frequency: months,
             client_ids: vec![],
             inspected_by: None,
+            notes: String::new(),
             new_phones: vec![],
             inspected_by_phone: None,
         }
@@ -748,6 +765,20 @@ mod tests {
         linked.sort();
         assert_eq!(linked, [known, new]);
         assert_eq!(visits(&conn, car_id), [visit("2024-05-01", Some(new))]);
+    }
+
+    #[test]
+    fn other_information_is_saved_trimmed_and_searchable() {
+        let mut conn = test_connection();
+        let mut input = car_input("B1AAA", None, 12);
+        input.notes = "  zgârietură ușă stânga, GPL  ".into();
+        save_car(&mut conn, input).unwrap();
+        save_car(&mut conn, car_input("B2AAA", None, 12)).unwrap();
+
+        let found = cars_page(&conn, "gpl", None);
+        assert_eq!(found.total, 1);
+        assert_eq!(found.rows[0].notes, "zgârietură ușă stânga, GPL");
+        assert_eq!(cars_page(&conn, "B2AAA", None).rows[0].notes, "");
     }
 
     #[test]

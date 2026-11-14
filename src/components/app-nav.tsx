@@ -1,6 +1,7 @@
 import {
   DatabaseIcon,
   FileSpreadsheetIcon,
+  LayoutDashboardIcon,
   InfoIcon,
   MessageSquareIcon,
   SettingsIcon,
@@ -11,6 +12,7 @@ import { useI18n } from "@/lib/i18n";
 const items = [
   { page: "data", icon: DatabaseIcon },
   { page: "reports", icon: FileSpreadsheetIcon },
+  { page: "dashboard", icon: LayoutDashboardIcon },
   { page: "autoSms", icon: MessageSquareIcon },
   { page: "settings", icon: SettingsIcon },
   { page: "about", icon: InfoIcon },

@@ -19,6 +19,7 @@ use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBui
 use tokio::sync::{Notify, oneshot};
 
 use crate::data::AppError;
+use crate::sms::MessageImage;
 
 const LABEL: &str = "whatsapp";
 const WHATSAPP_WEB: &str = "https://web.whatsapp.com";
@@ -32,6 +33,8 @@ const SEND_LIMIT: Duration = Duration::from_secs(120);
 const RETRY_EVERY: Duration = Duration::from_secs(1);
 /// After Stop, how long to wait for the page to say whether it already pressed Send.
 const STOP_GRACE: Duration = Duration::from_secs(10);
+/// How long the chat page may take to load before a picture is handed to it.
+const PAGE_LIMIT: Duration = Duration::from_secs(60);
 const LOG_FILE: &str = "whatsapp-log.txt";
 /// The log is started over once it grows past this.
 const LOG_LIMIT_BYTES: u64 = 512 * 1024;
@@ -311,7 +314,14 @@ pub async fn ensure_ready(app: &AppHandle) -> Result<()> {
     }
 }
 
-pub async fn send(app: &AppHandle, phone: &str, text: &str, stop: &Stop<'_>) -> Result<Outcome> {
+/// Sends `text`, with `image` attached and the text as its caption when there is one.
+pub async fn send(
+    app: &AppHandle,
+    phone: &str,
+    text: &str,
+    image: Option<&MessageImage>,
+    stop: &Stop<'_>,
+) -> Result<Outcome> {
     let Some(link) = link_phone(phone) else { return Ok(Outcome::NotOnWhatsApp) };
     // Closing the WhatsApp window stops the batch, so it is never reopened here.
     let Some(window) = app.get_webview_window(LABEL) else { return Ok(Outcome::Stopped) };
@@ -328,16 +338,47 @@ pub async fn send(app: &AppHandle, phone: &str, text: &str, stop: &Stop<'_>) -> 
     window.navigate(url).map_err(error)?;
 
     let token = new_token(&app.state::<WhatsAppService>());
-    log(app, &format!("[{token}] sending to +{link}"));
+    let with_picture = if image.is_some() { " with a picture" } else { "" };
+    log(app, &format!("[{token}] sending to +{link}{with_picture}"));
+
+    if let Some(image) = image {
+        // The picture is large, so it is handed over once, after the new page has loaded,
+        // instead of with every repeated call below.
+        let fresh = ask(
+            app,
+            &window,
+            |check| format!("window.__vi && window.__vi.fresh({}, {navigated_at})", json(check)),
+            PAGE_LIMIT,
+        )
+        .await;
+        if fresh.is_none() {
+            log(app, &format!("[{token}] result: the chat page did not load"));
+            return Ok(if stop.is_set() || app.get_webview_window(LABEL).is_none() {
+                Outcome::Stopped
+            } else {
+                Outcome::Failed
+            });
+        }
+        window
+            .eval(format!(
+                "window.__vi.stash({}, {}, {})",
+                json(&token),
+                json(&image.base64),
+                json(&image.mime)
+            ))
+            .map_err(error)?;
+    }
+
     let report = ask_with(
         app,
         &window,
         &token,
         |token| {
             format!(
-                "window.__vi && window.__vi.send({}, {}, {navigated_at})",
+                "window.__vi && window.__vi.send({}, {}, {navigated_at}, {})",
                 json(token),
-                json(text)
+                json(text),
+                image.is_some()
             )
         },
         SEND_LIMIT,

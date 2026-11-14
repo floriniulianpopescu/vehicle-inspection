@@ -25,6 +25,9 @@ pub struct ReportRequest {
     to: String,
     /// How far ahead the expiring list looks.
     expiring_days: i64,
+    /// Only cars inspected every this many months; every car when empty.
+    #[serde(default)]
+    frequency: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -107,6 +110,11 @@ const CAR_PHONES: &str = "COALESCE((SELECT group_concat(Phone, ', ') FROM (
         SELECT cl.Phone FROM carsclients l JOIN clients cl ON cl.ClientID = l.ClientID
         WHERE l.CarID = c.CarID ORDER BY cl.Phone)), '')";
 
+/// Matches every car when the frequency parameter number `n` is empty.
+fn frequency_filter(n: usize) -> String {
+    format!("(?{n} IS NULL OR c.RevisionFrequency = ?{n})")
+}
+
 fn inspected(conn: &Connection, request: &ReportRequest) -> Result<Vec<InspectedRow>> {
     let sql = format!(
         "SELECT i.InspectionID, i.Date, c.CarID, c.Plate, c.Manufacturer, c.Model, cl.Phone,
@@ -114,12 +122,13 @@ fn inspected(conn: &Connection, request: &ReportRequest) -> Result<Vec<Inspected
          FROM inspections i
          JOIN cars c ON c.CarID = i.CarID
          LEFT JOIN clients cl ON cl.ClientID = i.ClientID
-         WHERE i.Date BETWEEN ?1 AND ?2
+         WHERE i.Date BETWEEN ?1 AND ?2 AND {frequency}
          ORDER BY i.Date DESC, c.Plate",
         next = data::NEXT_REVISION,
+        frequency = frequency_filter(3),
     );
     let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map(params![request.from, request.to], |row| {
+    let rows = statement.query_map(params![request.from, request.to, request.frequency], |row| {
         Ok(InspectedRow {
             inspection_id: row.get(0)?,
             date: row.get(1)?,
@@ -149,53 +158,57 @@ fn due_from_row(row: &Row) -> rusqlite::Result<DueRow> {
 
 /// Cars whose `next_revision` matches `condition`, soonest first. `days` is the distance
 /// from today, always positive.
+/// The last value in `values` is the frequency filter.
 fn due(conn: &Connection, condition: &str, days: &str, values: &[&dyn rusqlite::ToSql]) -> Result<Vec<DueRow>> {
     let sql = format!(
         "SELECT CarID, Plate, Manufacturer, Model, LastRevision, next_revision, {days}, phones
          FROM (
              SELECT c.CarID, c.Plate, c.Manufacturer, c.Model, c.LastRevision,
                     {next} AS next_revision, {CAR_PHONES} AS phones
-             FROM cars c WHERE c.LastRevision IS NOT NULL
+             FROM cars c WHERE c.LastRevision IS NOT NULL AND {frequency}
          )
          WHERE {condition}
          ORDER BY next_revision, Plate",
         next = data::NEXT_REVISION,
+        frequency = frequency_filter(values.len()),
     );
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(values, due_from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn expiring(conn: &Connection, today: &str, days: i64) -> Result<Vec<DueRow>> {
+fn expiring(conn: &Connection, today: &str, days: i64, frequency: Option<i64>) -> Result<Vec<DueRow>> {
     due(
         conn,
         "next_revision BETWEEN ?1 AND date(?1, '+' || ?2 || ' days')",
         "CAST(julianday(next_revision) - julianday(?1) AS INTEGER)",
-        &[&today, &days],
+        &[&today, &days, &frequency],
     )
 }
 
-fn expired(conn: &Connection, today: &str) -> Result<Vec<DueRow>> {
+fn expired(conn: &Connection, today: &str, frequency: Option<i64>) -> Result<Vec<DueRow>> {
     due(
         conn,
         "next_revision < ?1",
         "CAST(julianday(?1) - julianday(next_revision) AS INTEGER)",
-        &[&today],
+        &[&today, &frequency],
     )
 }
 
 /// Cars inspected more than once, over all time.
-fn repeat_cars(conn: &Connection) -> Result<Vec<RepeatCar>> {
+fn repeat_cars(conn: &Connection, frequency: Option<i64>) -> Result<Vec<RepeatCar>> {
     let sql = format!(
         "SELECT c.CarID, c.Plate, c.Manufacturer, c.Model, v.visits, v.first_visit, v.last_visit,
                 {CAR_PHONES}
          FROM (SELECT CarID, COUNT(*) AS visits, MIN(Date) AS first_visit, MAX(Date) AS last_visit
                FROM inspections GROUP BY CarID HAVING COUNT(*) > 1) v
          JOIN cars c ON c.CarID = v.CarID
-         ORDER BY v.visits DESC, v.last_visit DESC, c.Plate"
+         WHERE {frequency}
+         ORDER BY v.visits DESC, v.last_visit DESC, c.Plate",
+        frequency = frequency_filter(1),
     );
     let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map([], |row| {
+    let rows = statement.query_map([frequency], |row| {
         Ok(RepeatCar {
             car_id: row.get(0)?,
             plate: row.get(1)?,
@@ -210,20 +223,25 @@ fn repeat_cars(conn: &Connection) -> Result<Vec<RepeatCar>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Clients who brought a car more than once, with any of their cars, over all time.
-fn repeat_clients(conn: &Connection) -> Result<Vec<RepeatClient>> {
-    let mut statement = conn.prepare(
+/// Clients who brought a car more than once, with any of their cars, over all time. With a
+/// frequency chosen, only visits with cars of that frequency count.
+fn repeat_clients(conn: &Connection, frequency: Option<i64>) -> Result<Vec<RepeatClient>> {
+    let sql = format!(
         "SELECT cl.ClientID, cl.Phone, COUNT(*) AS visits,
                 (SELECT group_concat(Plate, ', ') FROM (
                     SELECT DISTINCT c.Plate FROM inspections j JOIN cars c ON c.CarID = j.CarID
-                    WHERE j.ClientID = cl.ClientID ORDER BY c.Plate)),
+                    WHERE j.ClientID = cl.ClientID AND {frequency} ORDER BY c.Plate)),
                 MAX(i.Date) AS last_visit
          FROM inspections i
          JOIN clients cl ON cl.ClientID = i.ClientID
+         JOIN cars c ON c.CarID = i.CarID
+         WHERE {frequency}
          GROUP BY cl.ClientID HAVING COUNT(*) > 1
          ORDER BY visits DESC, last_visit DESC, cl.Phone",
-    )?;
-    let rows = statement.query_map([], |row| {
+        frequency = frequency_filter(1),
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map([frequency], |row| {
         Ok(RepeatClient {
             client_id: row.get(0)?,
             phone: row.get(1)?,
@@ -248,10 +266,10 @@ pub fn build(conn: &Connection, request: &ReportRequest) -> Result<Report> {
 fn build_on(conn: &Connection, request: &ReportRequest, today: &str, now: String) -> Result<Report> {
     Ok(Report {
         inspected: inspected(conn, request)?,
-        expiring: expiring(conn, today, request.expiring_days)?,
-        expired: expired(conn, today)?,
-        repeat_cars: repeat_cars(conn)?,
-        repeat_clients: repeat_clients(conn)?,
+        expiring: expiring(conn, today, request.expiring_days, request.frequency)?,
+        expired: expired(conn, today, request.frequency)?,
+        repeat_cars: repeat_cars(conn, request.frequency)?,
+        repeat_clients: repeat_clients(conn, request.frequency)?,
         generated_at: now,
     })
 }
@@ -490,7 +508,39 @@ mod tests {
     const TODAY: &str = "2030-06-15";
 
     fn request(from: &str, to: &str, expiring_days: i64) -> ReportRequest {
-        ReportRequest { from: from.into(), to: to.into(), expiring_days }
+        ReportRequest { from: from.into(), to: to.into(), expiring_days, frequency: None }
+    }
+
+    #[test]
+    fn every_list_can_be_limited_to_one_frequency() {
+        let conn = test_connection();
+        // Both expired by TODAY, each inspected twice by the same client.
+        let yearly = add_car(&conn, "B1YEAR", Some("2029-01-01"), 12);
+        let three = add_car(&conn, "B3YEAR", Some("2027-01-01"), 36);
+        let client = add_client(&conn, "0722000000", Some(yearly));
+        for (car, first, last) in [(yearly, "2028-01-01", "2029-01-01"), (three, "2024-01-01", "2027-01-01")] {
+            inspect(&conn, Some(client), car, first);
+            inspect(&conn, Some(client), car, last);
+        }
+        let filtered = |frequency| {
+            report(&conn, &ReportRequest { frequency, ..request("2020-01-01", TODAY, 30) })
+        };
+
+        let everything = filtered(None);
+        assert_eq!(everything.inspected.len(), 4);
+        assert_eq!(everything.expired.len(), 2);
+        assert_eq!(everything.repeat_cars.len(), 2);
+        assert_eq!(everything.repeat_clients[0].visits, 4);
+
+        let only_three = filtered(Some(36));
+        assert!(only_three.inspected.iter().all(|row| row.plate == "B3YEAR"));
+        assert_eq!(only_three.inspected.len(), 2);
+        assert_eq!(plates(&only_three.expired), [("B3YEAR", 165)]);
+        assert_eq!(only_three.repeat_cars.len(), 1);
+        assert_eq!(only_three.repeat_clients[0].visits, 2);
+        assert_eq!(only_three.repeat_clients[0].plates, "B3YEAR");
+
+        assert!(filtered(Some(6)).repeat_clients.is_empty());
     }
 
     fn report(conn: &Connection, request: &ReportRequest) -> Report {

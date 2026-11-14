@@ -30,11 +30,10 @@ import { useI18n } from "@/lib/i18n";
 const STATES: RevisionState[] = ["overdue", "soon", "ok", "unknown"];
 const SORTS: CarSort[] = ["plate", "newest", "oldest"];
 
-export const STATE_VARIANT = {
-  overdue: "destructive",
-  soon: "default",
-  ok: "secondary",
-  unknown: "outline",
+/** Green when the inspection is valid; red when it is expired, expiring soon or unknown. */
+const STATE_BADGE = {
+  ok: "border-emerald-600/40 bg-emerald-500/15 text-emerald-800 dark:text-emerald-200",
+  other: "border-red-600/40 bg-red-500/15 text-red-800 dark:text-red-200",
 } as const;
 
 export function CarsTab({
@@ -181,12 +180,13 @@ export function CarsTab({
             <TableHead>{t.data.lastRevision}</TableHead>
             <TableHead>{t.data.frequency}</TableHead>
             <TableHead>{t.data.nextRevision}</TableHead>
+            <TableHead>{t.data.notes}</TableHead>
             <TableHead>{t.data.linkedClients}</TableHead>
             <TableHead />
           </TableRow>
         </TableHeader>
         <TableBody>
-          {list.rows.length === 0 && <EmptyRow columns={8} />}
+          {list.rows.length === 0 && <EmptyRow columns={9} />}
           {list.rows.map((car) => (
             <TableRow key={car.carId}>
               <TableCell className="font-medium">{car.plate}</TableCell>
@@ -197,10 +197,16 @@ export function CarsTab({
               <TableCell>
                 <div className="flex items-center gap-2">
                   {car.nextRevision && displayDate(car.nextRevision)}
-                  <Badge variant={STATE_VARIANT[car.revisionState]}>
+                  <Badge
+                    variant="outline"
+                    className={STATE_BADGE[car.revisionState === "ok" ? "ok" : "other"]}
+                  >
                     {t.data.states[car.revisionState]}
                   </Badge>
                 </div>
+              </TableCell>
+              <TableCell className="max-w-64 whitespace-normal text-muted-foreground">
+                {car.notes || "-"}
               </TableCell>
               <TableCell className="whitespace-normal">
                 {car.clients.map((client) => client.label).join(", ")}

@@ -20,7 +20,10 @@ use crate::db::Database;
 use gateway::Gateway;
 use pending::{CHANNEL_WHATSAPP, KIND_INSPECTION};
 use crate::whatsapp;
-pub use pending::{PendingMessage, SentMessage, Template, history, save_template, templates};
+pub use pending::{
+    MessageImage, PendingMessage, SentMessage, Template, history, remove_template_image, save_template,
+    save_template_image, templates,
+};
 use pending::{DEFAULT_REMINDER_DAYS, MAX_REMINDER_DAYS};
 
 /// Seconds between the start of one message and the next. Fewer than 30 risks the phone's
@@ -316,7 +319,12 @@ async fn send_batch(
         previous_start = Some(Instant::now());
         let sent = if message.channel == CHANNEL_WHATSAPP {
             let stop = whatsapp::Stop { requested: &service.stop_requested, signal: &service.stop_signal };
-            match whatsapp::send(app, &message.phone, &message.text, &stop).await? {
+            let image = if message.has_image {
+                app.state::<Database>().with(|conn| pending::template_image(conn, &message.kind))?
+            } else {
+                None
+            };
+            match whatsapp::send(app, &message.phone, &message.text, image.as_ref(), &stop).await? {
                 whatsapp::Outcome::Sent => true,
                 // Not recorded, so it is offered again next time.
                 whatsapp::Outcome::Stopped => break,

@@ -118,8 +118,115 @@
   // Set when staff press Stop. Before Send is pressed the message is dropped; after, it is
   // only confirmed quickly.
   let cancelled = null;
+  // The picture for the next send, handed over separately because it is large.
+  let stashed = null;
 
-  async function send(token, text, navigatedAt) {
+  /** Every Send control on the page: icons named "send" and buttons labelled Send. */
+  function sendControls() {
+    const icons = [...document.querySelectorAll('[data-icon*="send"]')].map(
+      (icon) => icon.closest('button, [role="button"]') || icon,
+    );
+    const labelled = [...document.querySelectorAll('button[aria-label], [role="button"][aria-label]')].filter(
+      (button) => SEND_LABEL.test(flat(button.getAttribute("aria-label"))),
+    );
+    return [...new Set([...icons, ...labelled])];
+  }
+
+  async function waitFor(check, limitMs) {
+    const started = Date.now();
+    while (Date.now() - started < limitMs) {
+      const found = check();
+      if (found) return found;
+      await wait(POLL_MS);
+    }
+    return null;
+  }
+
+  function imageFile(picture) {
+    const bytes = Uint8Array.from(atob(picture.base64), (char) => char.charCodeAt(0));
+    const extension = picture.mime === "image/png" ? "png" : "jpg";
+    return new File([bytes], `felicitare.${extension}`, { type: picture.mime });
+  }
+
+  /** Waits for WhatsApp's tick on the message showing `snippet`, then reports the result. */
+  async function confirm(panel, snippet, stopped, finish) {
+    const sentAt = Date.now();
+    let last = "unknown";
+    while (Date.now() - sentAt < CONFIRM_LIMIT_MS) {
+      const message = shownMessage(panel, snippet);
+      if (message) {
+        last = tickState(message);
+        if (last === "sent") return finish("sent");
+        // Stopping: the message is in the chat, so WhatsApp has it.
+        if (stopped()) return finish("sent_unconfirmed");
+      }
+      await wait(POLL_MS);
+    }
+    // The text is in the chat: WhatsApp has it. A clock means it is queued and goes out as
+    // soon as it can.
+    if (shownMessage(panel, snippet)) return finish(last === "pending" ? "queued" : "sent_unconfirmed");
+    finish("timeout_after_send");
+  }
+
+  /**
+   * Sends the picture with the text as its caption: pastes it into the chat (or drops it, if
+   * pasting does nothing), fills in the caption if WhatsApp did not carry the text over, and
+   * presses the Send button of the preview that opens.
+   */
+  async function sendWithImage(box, expected, text, picture, stopped, trace, finish) {
+    const snippet = expected.slice(0, 40);
+    const panel = chatPanel(box);
+    const fieldsBefore = new Set(editables());
+    const controlsBefore = new Set(sendControls());
+    // The preview has a Send button and a caption field that were not there before.
+    const preview = () => {
+      const control = sendControls().find((candidate) => !controlsBefore.has(candidate));
+      const caption = editables().find((field) => !fieldsBefore.has(field));
+      return control && caption ? { control, caption } : null;
+    };
+    const files = () => {
+      const transfer = new DataTransfer();
+      transfer.items.add(imageFile(picture));
+      return transfer;
+    };
+
+    trace("pasting the picture");
+    box.focus();
+    box.dispatchEvent(new ClipboardEvent("paste", { clipboardData: files(), bubbles: true, cancelable: true }));
+    let opened = await waitFor(preview, 8000);
+    if (!opened) {
+      trace("paste did nothing, dropping the picture");
+      for (const type of ["dragenter", "dragover", "drop"]) {
+        panel.dispatchEvent(new DragEvent(type, { dataTransfer: files(), bubbles: true, cancelable: true }));
+      }
+      opened = await waitFor(preview, 8000);
+    }
+    if (!opened) return finish("image_not_attached");
+    if (stopped()) return finish("cancelled");
+
+    if (!flat(opened.caption.textContent).includes(snippet)) {
+      trace("writing the caption");
+      opened.caption.focus();
+      document.execCommand("insertText", false, text);
+      await wait(500);
+    }
+
+    trace("pressing send on the picture");
+    opened.control.click();
+    await wait(1500);
+    // WhatsApp may leave the original text in the message box as a draft; clear it so it is
+    // never sent on its own later.
+    const leftover = composerWith(expected);
+    if (leftover && leftover !== opened.caption) {
+      leftover.focus();
+      document.execCommand("selectAll");
+      document.execCommand("delete");
+    }
+    trace("waiting for the tick");
+    return confirm(panel, snippet, stopped, finish);
+  }
+
+  async function send(token, text, navigatedAt, withImage) {
     // Only the page opened for this message may act. An older page could still be showing the
     // same greeting for the previous client.
     if (performance.timeOrigin < navigatedAt) return;
@@ -131,6 +238,8 @@
     const finish = (result) => report({ token, kind: "send", result });
 
     const stopped = () => cancelled === token;
+    const picture = withImage ? stashed : null;
+    if (withImage && (!picture || picture.token !== token)) return finish("no_image");
 
     trace("waiting for the chat");
     const openedAt = Date.now();
@@ -150,6 +259,7 @@
     if (stopped()) return finish("cancelled");
     box = composerWith(expected) || box;
     const panel = chatPanel(box);
+    if (picture) return sendWithImage(box, expected, text, picture, stopped, trace, finish);
 
     const button = sendButtonNear(box);
     trace(button ? "pressing send" : "no send button, pressing enter");
@@ -166,28 +276,20 @@
     if (composerWith(expected)) return finish("not_sent");
 
     trace("waiting for the tick");
-    const sentAt = Date.now();
-    let last = "unknown";
-    while (Date.now() - sentAt < CONFIRM_LIMIT_MS) {
-      const message = shownMessage(panel, snippet);
-      if (message) {
-        last = tickState(message);
-        if (last === "sent") return finish("sent");
-        // Stopping: the message is in the chat, so WhatsApp has it.
-        if (stopped()) return finish("sent_unconfirmed");
-      }
-      await wait(POLL_MS);
-    }
-    // The box emptied and the text is in the chat: WhatsApp has it. A clock means it is
-    // queued and goes out as soon as it can.
-    if (shownMessage(panel, snippet)) return finish(last === "pending" ? "queued" : "sent_unconfirmed");
-    finish("timeout_after_send");
+    return confirm(panel, snippet, stopped, finish);
   }
 
   window.__vi = {
     probe: (token) => report({ token, kind: "status", state: state() }),
     cancel: (token) => {
       cancelled = token;
+    },
+    /** Answers once this is the page opened for the current message. */
+    fresh: (token, navigatedAt) => {
+      if (performance.timeOrigin >= navigatedAt) report({ token, kind: "fresh" });
+    },
+    stash: (token, base64, mime) => {
+      stashed = { token, base64, mime };
     },
     send,
   };

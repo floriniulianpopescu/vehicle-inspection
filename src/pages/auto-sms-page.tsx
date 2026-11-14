@@ -1,4 +1,4 @@
-import { MessageSquareIcon, PartyPopperIcon } from "lucide-react";
+import { MessageSquareIcon, PartyPopperIcon, ThumbsUpIcon } from "lucide-react";
 import { HistoryTab } from "@/components/sms/history-tab";
 import { PendingTab } from "@/components/sms/pending-tab";
 import { TemplatesTab } from "@/components/sms/templates-tab";
@@ -20,14 +20,21 @@ export function AutoSmsPage() {
             <PartyPopperIcon />
             {t.sms.tabs.greetings}
           </TabsTrigger>
+          <TabsTrigger value="feedback">
+            <ThumbsUpIcon />
+            {t.sms.tabs.feedback}
+          </TabsTrigger>
           <TabsTrigger value="history">{t.sms.tabs.history}</TabsTrigger>
           <TabsTrigger value="templates">{t.sms.tabs.templates}</TabsTrigger>
         </TabsList>
         <TabsContent value="reminders">
-          <PendingTab channel="sms" />
+          <PendingTab group="reminders" />
         </TabsContent>
         <TabsContent value="greetings">
-          <PendingTab channel="whatsapp" />
+          <PendingTab group="greetings" />
+        </TabsContent>
+        <TabsContent value="feedback">
+          <PendingTab group="feedback" />
         </TabsContent>
         <TabsContent value="history">
           <HistoryTab />

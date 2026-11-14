@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { AboutPage } from "@/pages/about-page";
 import { AutoSmsPage } from "@/pages/auto-sms-page";
+import { DashboardPage } from "@/pages/dashboard-page";
 import { DataPage } from "@/pages/data-page";
 import { ReportsPage } from "@/pages/reports-page";
 import { SettingsPage } from "@/pages/settings-page";
@@ -43,6 +44,8 @@ export default function App() {
           <DataPage />
         ) : page === "reports" ? (
           <ReportsPage />
+        ) : page === "dashboard" ? (
+          <DashboardPage />
         ) : page === "settings" ? (
           <SettingsPage />
         ) : page === "about" ? (

@@ -3,7 +3,7 @@ import type { Messages } from "@/locales/ro";
 
 export const PAGE_SIZE = 50;
 
-export type Frequency = 6 | 12 | 24;
+export type Frequency = 6 | 12 | 24 | 36;
 export type RevisionState = "overdue" | "soon" | "ok" | "unknown";
 
 export type Page<T> = { rows: T[]; total: number };
@@ -18,6 +18,8 @@ export type Car = {
   model: string;
   lastRevision: string | null;
   revisionFrequency: Frequency;
+  /** "Other information", empty when not filled in. */
+  notes: string;
   nextRevision: string | null;
   revisionState: RevisionState;
   /** The client who brought the car to its last inspection, when known. */
@@ -49,6 +51,7 @@ export type CarInput = {
   model: string;
   lastRevision: string | null;
   revisionFrequency: number;
+  notes: string;
   clientIds: number[];
   inspectedBy: number | null;
   /** Typed numbers that become new clients linked to the car. */
@@ -74,7 +77,13 @@ export type BackupStatus = {
 };
 export type RemoteBackup = { id: string; name: string; createdTime: string; size: string | null };
 
-export type ReportRequest = { from: string; to: string; expiringDays: number };
+export type ReportRequest = {
+  from: string;
+  to: string;
+  expiringDays: number;
+  /** Only cars with this inspection frequency, in months; all when null. */
+  frequency: Frequency | null;
+};
 export type InspectedRow = {
   inspectionId: number;
   date: string;
@@ -146,7 +155,36 @@ export type ReportExportLabels = {
 /** The longest look-ahead for expiring inspections, about six months. */
 export const MAX_EXPIRING_DAYS = 180;
 
-export type SmsKind = "inspection" | "christmas" | "new_year" | "easter";
+export type DashboardMetric =
+  | "inspections_over_time"
+  | "inspections_by_manufacturer"
+  | "inspections_by_frequency"
+  | "inspections_by_weekday"
+  | "cars_by_state"
+  | "cars_by_manufacturer"
+  | "cars_by_model"
+  | "cars_by_frequency"
+  | "expiring_over_time"
+  | "messages_over_time"
+  | "messages_by_kind"
+  | "messages_by_status"
+  | "clients_by_visits"
+  | "new_vs_returning"
+  | "new_vs_returning_over_time";
+export type Grouping = "auto" | "day" | "week" | "month";
+export type DashboardFilters = {
+  from: string;
+  to: string;
+  frequency: Frequency | null;
+  manufacturer: string | null;
+};
+/** `parts` splits the value, for split measures, in the order of the series' `parts`. */
+export type DashboardPoint = { key: string; value: number; parts?: number[] };
+/** `grouping` is the one actually used, for measures over time. */
+export type DashboardSeries = { points: DashboardPoint[]; grouping: Grouping | null; parts: string[] | null };
+export type DashboardSummary = { cars: number; inspections: number; expired: number; messagesSent: number };
+
+export type SmsKind = "inspection" | "christmas" | "new_year" | "easter" | "feedback";
 export type PendingMessage = {
   key: string;
   kind: SmsKind;
@@ -157,6 +195,8 @@ export type PendingMessage = {
   plate: string | null;
   dueDate: string;
   text: string;
+  /** The greeting has a picture to send with it. */
+  hasImage: boolean;
 };
 export type SentMessage = {
   messageId: number;
@@ -175,7 +215,8 @@ export type SendProgress = {
   failed: number;
   error: string | null;
 };
-export type SmsTemplate = { kind: SmsKind; text: string };
+/** `image` is a data URL, only for greetings that have a picture. */
+export type SmsTemplate = { kind: SmsKind; text: string; image?: string | null };
 export type WhatsAppConnection = "closed" | "loading" | "qr" | "ready";
 export type GatewaySettings = { address: string; username: string; hasPassword: boolean };
 
@@ -203,7 +244,11 @@ export const api = {
   smsProgress: () => invoke<SendProgress>("sms_progress"),
   smsHistory: (page: number) => invoke<Page<SentMessage>>("sms_history", { page }),
   smsTemplates: () => invoke<SmsTemplate[]>("sms_templates"),
-  smsSaveTemplate: (template: SmsTemplate) => invoke<void>("sms_save_template", { template }),
+  smsSaveTemplate: (template: SmsTemplate) =>
+    invoke<void>("sms_save_template", { template: { kind: template.kind, text: template.text } }),
+  smsSaveTemplateImage: (kind: SmsKind, data: string, mime: string) =>
+    invoke<void>("sms_save_template_image", { kind, data, mime }),
+  smsRemoveTemplateImage: (kind: SmsKind) => invoke<void>("sms_remove_template_image", { kind }),
   smsGatewaySettings: () => invoke<GatewaySettings>("sms_gateway_settings"),
   smsSaveGatewaySettings: (address: string, username: string, password: string | null) =>
     invoke<GatewaySettings>("sms_save_gateway_settings", { address, username, password }),
@@ -211,6 +256,10 @@ export const api = {
   whatsappStatus: () => invoke<WhatsAppConnection>("whatsapp_status"),
   whatsappOpen: () => invoke<void>("whatsapp_open"),
   whatsappLogOut: () => invoke<void>("whatsapp_log_out"),
+  dashboardSeries: (filters: DashboardFilters, metric: DashboardMetric, grouping: Grouping) =>
+    invoke<DashboardSeries>("dashboard_series", { filters, metric, grouping }),
+  dashboardSummary: (filters: DashboardFilters) => invoke<DashboardSummary>("dashboard_summary", { filters }),
+  dashboardManufacturers: () => invoke<string[]>("dashboard_manufacturers"),
   report: (request: ReportRequest) => invoke<Report>("report", { request }),
   exportReport: (request: ReportRequest, labels: ReportExportLabels, fileName: string) =>
     invoke<string | null>("export_report", { request, labels, fileName }),

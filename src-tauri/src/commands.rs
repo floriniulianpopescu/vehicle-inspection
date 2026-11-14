@@ -6,6 +6,7 @@ use crate::data::{
     self, AppError, Car, CarFilter, CarInput, Client, ClientFilter, ClientInput, DeletePreview,
     Page, PickerOption,
 };
+use crate::dashboard::{self, Filters, Grouping, Metric, Series, Summary};
 use crate::db::{Database, DatabaseInfo};
 use crate::whatsapp::{self, Connection};
 use crate::sms::{self, GatewaySettings, PendingMessage, SendProgress, SentMessage, Template};
@@ -119,6 +120,26 @@ pub async fn backup_restore(
 }
 
 #[tauri::command]
+pub fn dashboard_series(
+    db: Db<'_>,
+    filters: Filters,
+    metric: Metric,
+    grouping: Grouping,
+) -> Result<Series, AppError> {
+    db.with(|conn| dashboard::series(conn, &filters, metric, grouping))
+}
+
+#[tauri::command]
+pub fn dashboard_summary(db: Db<'_>, filters: Filters) -> Result<Summary, AppError> {
+    db.with(|conn| dashboard::summary(conn, &filters))
+}
+
+#[tauri::command]
+pub fn dashboard_manufacturers(db: Db<'_>) -> Result<Vec<String>, AppError> {
+    db.with(|conn| dashboard::manufacturers(conn))
+}
+
+#[tauri::command]
 pub fn report(db: Db<'_>, request: ReportRequest) -> Result<Report, AppError> {
     db.with(|conn| reports::build(conn, &request))
 }
@@ -180,6 +201,16 @@ pub async fn whatsapp_open(app: AppHandle) -> Result<(), AppError> {
 #[tauri::command]
 pub async fn whatsapp_log_out(app: AppHandle) -> Result<(), AppError> {
     whatsapp::log_out(&app)
+}
+
+#[tauri::command]
+pub fn sms_save_template_image(db: Db<'_>, kind: String, data: String, mime: String) -> Result<(), AppError> {
+    db.with(|conn| sms::save_template_image(conn, &kind, &data, &mime))
+}
+
+#[tauri::command]
+pub fn sms_remove_template_image(db: Db<'_>, kind: String) -> Result<(), AppError> {
+    db.with(|conn| sms::remove_template_image(conn, &kind))
 }
 
 #[tauri::command]
