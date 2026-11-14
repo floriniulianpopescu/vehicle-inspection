@@ -196,6 +196,7 @@ export const en: Messages = {
     exported: "The report was saved to {path}",
     fileName: "inspection-report",
     print: "Print",
+    rowNumber: "No.",
     printTitle: "Vehicle inspection report",
     generatedAt: "Generated at",
     withinDays: "within the next {days} days",

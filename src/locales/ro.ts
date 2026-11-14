@@ -196,6 +196,7 @@ export const ro = {
     exported: "Raportul a fost salvat în {path}",
     fileName: "raport-inspectii",
     print: "Printează",
+    rowNumber: "Nr. crt.",
     printTitle: "Raport inspecții ITP",
     generatedAt: "Generat la",
     withinDays: "în următoarele {days} zile",
