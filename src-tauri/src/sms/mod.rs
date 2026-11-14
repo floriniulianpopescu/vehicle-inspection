@@ -26,6 +26,8 @@ use pending::{DEFAULT_REMINDER_DAYS, MAX_REMINDER_DAYS};
 /// Seconds between the start of one message and the next. Fewer than 30 risks the phone's
 /// carrier treating the station as spam.
 pub const MIN_INTERVAL_SECONDS: u64 = 30;
+/// WhatsApp is stricter with automated messages, so greetings start with a longer pause.
+const DEFAULT_WHATSAPP_INTERVAL_SECONDS: u64 = 60;
 pub const MAX_INTERVAL_SECONDS: u64 = 3600;
 const PROGRESS_EVENT: &str = "sms-progress";
 
@@ -41,8 +43,10 @@ struct StoredSettings {
     username: String,
     /// How many days ahead an inspection reminder is offered.
     reminder_days: i64,
-    /// Seconds between messages, chosen before each send.
+    /// Seconds between SMS messages, chosen before each send.
     interval_seconds: u64,
+    /// Seconds between WhatsApp greetings, chosen before each send.
+    whatsapp_interval_seconds: u64,
 }
 
 impl Default for StoredSettings {
@@ -52,6 +56,7 @@ impl Default for StoredSettings {
             username: String::new(),
             reminder_days: DEFAULT_REMINDER_DAYS,
             interval_seconds: MIN_INTERVAL_SECONDS,
+            whatsapp_interval_seconds: DEFAULT_WHATSAPP_INTERVAL_SECONDS,
         }
     }
 }
@@ -195,12 +200,12 @@ pub fn set_reminder_days(app: &AppHandle, days: i64) -> Result<()> {
     service.store(next)
 }
 
-pub fn interval_seconds(app: &AppHandle) -> Result<u64> {
-    Ok(app
-        .state::<SmsService>()
-        .stored()?
-        .interval_seconds
-        .clamp(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS))
+/// The last pause used for this channel ("sms" or "whatsapp").
+pub fn interval_seconds(app: &AppHandle, channel: &str) -> Result<u64> {
+    let stored = app.state::<SmsService>().stored()?;
+    let seconds =
+        if channel == CHANNEL_WHATSAPP { stored.whatsapp_interval_seconds } else { stored.interval_seconds };
+    Ok(seconds.clamp(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS))
 }
 
 pub fn pending_messages(app: &AppHandle) -> Result<Vec<PendingMessage>> {
@@ -228,16 +233,20 @@ pub async fn start_sending(app: &AppHandle, keys: Vec<String>, interval_seconds:
     if !(MIN_INTERVAL_SECONDS..=MAX_INTERVAL_SECONDS).contains(&interval_seconds) {
         return Err(AppError::code("invalid_interval"));
     }
-    // Remembered as the starting value for the next send.
-    let service = app.state::<SmsService>();
-    let mut next = service.stored()?;
-    next.interval_seconds = interval_seconds;
-    service.store(next)?;
     if keys.is_empty() {
         return Ok(());
     }
     // Each channel is checked only if the batch uses it.
     let inspection_prefix = format!("{KIND_INSPECTION}:");
+    // Remembered per channel as the starting value for the next send.
+    let service = app.state::<SmsService>();
+    let mut next = service.stored()?;
+    if keys.iter().all(|key| key.starts_with(&inspection_prefix)) {
+        next.interval_seconds = interval_seconds;
+    } else {
+        next.whatsapp_interval_seconds = interval_seconds;
+    }
+    service.store(next)?;
     let gateway = if keys.iter().any(|key| key.starts_with(&inspection_prefix)) {
         let gateway = open_gateway(app).await?;
         gateway.check().await?;
@@ -352,11 +361,13 @@ mod tests {
                 username: "sms".into(),
                 reminder_days: 90,
                 interval_seconds: 45,
+                whatsapp_interval_seconds: 90,
             })
             .unwrap();
         let reopened = SmsService::new(directory.path());
         assert_eq!(reopened.stored().unwrap().address, "192.168.1.50");
         assert_eq!(reopened.stored().unwrap().reminder_days, 90);
         assert_eq!(reopened.stored().unwrap().interval_seconds, 45);
+        assert_eq!(reopened.stored().unwrap().whatsapp_interval_seconds, 90);
     }
 }

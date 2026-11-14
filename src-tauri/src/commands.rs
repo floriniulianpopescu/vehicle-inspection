@@ -163,8 +163,8 @@ pub fn sms_set_reminder_days(app: AppHandle, days: i64) -> Result<(), AppError> 
 }
 
 #[tauri::command]
-pub fn sms_interval_seconds(app: AppHandle) -> Result<u64, AppError> {
-    sms::interval_seconds(&app)
+pub fn sms_interval_seconds(app: AppHandle, channel: String) -> Result<u64, AppError> {
+    sms::interval_seconds(&app, &channel)
 }
 
 #[tauri::command]

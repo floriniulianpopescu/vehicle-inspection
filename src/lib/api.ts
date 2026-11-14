@@ -197,7 +197,8 @@ export const api = {
   smsPending: () => invoke<PendingMessage[]>("sms_pending"),
   smsSend: (keys: string[], intervalSeconds: number) =>
     invoke<void>("sms_send", { keys, intervalSeconds }),
-  smsIntervalSeconds: () => invoke<number>("sms_interval_seconds"),
+  smsIntervalSeconds: (channel: "sms" | "whatsapp") =>
+    invoke<number>("sms_interval_seconds", { channel }),
   smsStop: () => invoke<void>("sms_stop"),
   smsProgress: () => invoke<SendProgress>("sms_progress"),
   smsHistory: (page: number) => invoke<Page<SentMessage>>("sms_history", { page }),

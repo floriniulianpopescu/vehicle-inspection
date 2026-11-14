@@ -193,26 +193,36 @@ fn pending_at(conn: &Connection, today: &str, days: i64) -> Result<Vec<PendingMe
     Ok(all)
 }
 
-pub fn pending(conn: &Connection, days: i64) -> Result<Vec<PendingMessage>> {
-    // Debug builds can pretend it is another day, to try the greetings outside the holidays.
+/// Debug builds can pretend it is another day, to try the greetings outside the holidays.
+/// Sends are then recorded on that day too, so a greeting is not offered again.
+fn today_override() -> Option<String> {
     #[cfg(debug_assertions)]
     if let Ok(today) = std::env::var("VEHICLE_INSPECTION_TODAY") {
-        return pending_at(conn, &today, days);
+        return Some(today);
     }
-    let today: String = conn.query_row("SELECT date('now', 'localtime')", [], |row| row.get(0))?;
+    None
+}
+
+pub fn pending(conn: &Connection, days: i64) -> Result<Vec<PendingMessage>> {
+    let today: String = match today_override() {
+        Some(today) => today,
+        None => conn.query_row("SELECT date('now', 'localtime')", [], |row| row.get(0))?,
+    };
     pending_at(conn, &today, days)
 }
 
 pub fn record(conn: &Connection, message: &PendingMessage, sent: bool) -> Result<()> {
     conn.execute(
         "INSERT INTO messages (ClientID, CarID, Type, Text, SentAt, Status)
-         VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'), ?5)",
+         VALUES (?1, ?2, ?3, ?4,
+                 COALESCE(?6, date('now', 'localtime')) || strftime('T%H:%M:%S', 'now', 'localtime'), ?5)",
         params![
             message.client_id,
             message.car_id,
             message.kind,
             message.text,
-            if sent { "sent" } else { "failed" }
+            if sent { "sent" } else { "failed" },
+            today_override(),
         ],
     )?;
     Ok(())

@@ -29,18 +29,24 @@ import {
 
 type Filter = "all" | "expiring" | "expired";
 const FILTERS: Filter[] = ["all", "expiring", "expired"];
+export type Channel = PendingMessage["channel"];
 
-/** Expired means the ITP date has passed; greetings only show under "all". */
+/** Expired means the ITP date has passed. */
 function matches(item: PendingMessage, filter: Filter, today: string): boolean {
   if (filter === "all") return true;
-  if (item.kind !== "inspection") return false;
   return filter === "expired" ? item.dueDate < today : item.dueDate >= today;
 }
 
-export function PendingTab() {
+/**
+ * Messages waiting for one channel: ITP reminders by SMS, or greetings by WhatsApp. Each
+ * channel has its own list, pause and Send button; only one batch runs at a time.
+ */
+export function PendingTab({ channel }: { channel: Channel }) {
   const { t } = useI18n();
   const text = t.sms;
-  const [items, setItems] = useState<PendingMessage[]>([]);
+  const isSms = channel === "sms";
+  const [all, setAll] = useState<PendingMessage[]>([]);
+  const items = all.filter((item) => item.channel === channel);
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<Filter>("all");
   const [progress, setProgress] = useState<SendProgress | null>(null);
@@ -52,7 +58,7 @@ export function PendingTab() {
   const reload = useCallback(() => {
     api
       .smsPending()
-      .then(setItems)
+      .then(setAll)
       .catch((failure) => setError(errorMessage(t, failure)));
   }, [t]);
 
@@ -63,7 +69,7 @@ export function PendingTab() {
       .then(setDays)
       .catch(() => {});
     api
-      .smsIntervalSeconds()
+      .smsIntervalSeconds(channel)
       .then((seconds) => setIntervalText(String(seconds)))
       .catch(() => {});
     api.smsProgress().then(setProgress).catch(() => {});
@@ -73,7 +79,7 @@ export function PendingTab() {
         setConfigured(Boolean(settings.address && settings.username && settings.hasPassword)),
       )
       .catch(() => setConfigured(false));
-  }, [reload]);
+  }, [reload, channel]);
 
   useEffect(() => {
     const stop = listen<SendProgress>("sms-progress", (event) => {
@@ -91,7 +97,7 @@ export function PendingTab() {
     expiring: items.filter((item) => matches(item, "expiring", today)).length,
     expired: items.filter((item) => matches(item, "expired", today)).length,
   };
-  const visible = items.filter((item) => matches(item, filter, today));
+  const visible = isSms ? items.filter((item) => matches(item, filter, today)) : items;
   const selected = visible.filter((item) => !skipped.has(item.key));
   const allSelected = visible.length > 0 && selected.length === visible.length;
 
@@ -127,7 +133,7 @@ export function PendingTab() {
   }
 
   // ITP reminders need the SMS phone; greetings go through WhatsApp, checked when sending.
-  const needsPhone = !configured && selected.some((item) => item.channel === "sms");
+  const needsPhone = isSms && !configured;
 
   // The estimate follows the field as it is typed; below the minimum it counts the minimum.
   const typedInterval = Number.parseInt(intervalText, 10);
@@ -203,12 +209,15 @@ export function PendingTab() {
             >
               {intervalTooShort
                 ? text.intervalMinimum
-                : selected.length > 0 &&
-                  fill(text.estimate, { count: selected.length, duration: durationText })}
+                : selected.length === 1
+                  ? text.estimateOne
+                  : selected.length > 1 &&
+                    fill(text.estimate, { count: selected.length, duration: durationText })}
             </span>
             <Button
               className="ml-auto"
               disabled={needsPhone || selected.length === 0}
+              title={isSms ? text.channels.sms : text.channels.whatsapp}
               onClick={send}
             >
               <SendIcon />
@@ -218,16 +227,14 @@ export function PendingTab() {
         )}
       </div>
 
-      {days !== null && (
+      {isSms && days !== null && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <DaysInput label={text.reminderDays} value={days} onCommit={changeDays} />
           <span className="text-xs text-muted-foreground">{text.daysHint}</span>
         </div>
       )}
       {needsPhone && <p className="text-sm text-muted-foreground">{text.notConfigured}</p>}
-      {selected.some((item) => item.channel === "whatsapp") && (
-        <p className="text-sm text-muted-foreground">{text.whatsappNote}</p>
-      )}
+      {!isSms && <p className="text-sm text-muted-foreground">{text.whatsappNote}</p>}
       <FormError message={error} />
       {progress && !progress.active && progress.total > 0 && (
         <p className="text-sm">
@@ -236,21 +243,23 @@ export function PendingTab() {
       )}
       {progress?.error && <FormError message={errorMessage(t, progress.error)} />}
 
-      <div role="radiogroup" aria-label={text.filterLabel} className="flex flex-wrap gap-1">
-        {FILTERS.map((value) => (
-          <Button
-            key={value}
-            role="radio"
-            aria-checked={filter === value}
-            variant={filter === value ? "default" : "outline"}
-            size="sm"
-            onClick={() => setFilter(value)}
-          >
-            {text.filters[value]}
-            <Badge variant="secondary">{counts[value]}</Badge>
-          </Button>
-        ))}
-      </div>
+      {isSms && (
+        <div role="radiogroup" aria-label={text.filterLabel} className="flex flex-wrap gap-1">
+          {FILTERS.map((value) => (
+            <Button
+              key={value}
+              role="radio"
+              aria-checked={filter === value}
+              variant={filter === value ? "default" : "outline"}
+              size="sm"
+              onClick={() => setFilter(value)}
+            >
+              {text.filters[value]}
+              <Badge variant="secondary">{counts[value]}</Badge>
+            </Button>
+          ))}
+        </div>
+      )}
 
       <Table>
         <TableHeader>
@@ -263,16 +272,15 @@ export function PendingTab() {
                 onCheckedChange={(checked) => toggleAll(checked === true)}
               />
             </TableHead>
-            <TableHead>{text.type}</TableHead>
-            <TableHead>{text.channel}</TableHead>
+            {!isSms && <TableHead>{text.type}</TableHead>}
             <TableHead>{t.data.phone}</TableHead>
-            <TableHead>{t.data.plate}</TableHead>
-            <TableHead>{t.data.date}</TableHead>
+            {isSms && <TableHead>{t.data.plate}</TableHead>}
+            <TableHead>{isSms ? t.data.nextRevision : t.data.date}</TableHead>
             <TableHead>{text.message}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {visible.length === 0 && <EmptyRow columns={7} />}
+          {visible.length === 0 && <EmptyRow columns={5} />}
           {visible.map((item) => (
             <TableRow key={item.key}>
               <TableCell>
@@ -283,14 +291,13 @@ export function PendingTab() {
                   onCheckedChange={(checked) => toggle(item.key, checked === true)}
                 />
               </TableCell>
-              <TableCell>
-                <Badge variant="secondary">{text.kinds[item.kind]}</Badge>
-              </TableCell>
-              <TableCell>
-                <Badge variant="outline">{text.channels[item.channel]}</Badge>
-              </TableCell>
+              {!isSms && (
+                <TableCell>
+                  <Badge variant="secondary">{text.kinds[item.kind]}</Badge>
+                </TableCell>
+              )}
               <TableCell>{item.phone}</TableCell>
-              <TableCell className="font-medium">{item.plate ?? "-"}</TableCell>
+              {isSms && <TableCell className="font-medium">{item.plate ?? "-"}</TableCell>}
               <TableCell>{displayDate(item.dueDate)}</TableCell>
               <TableCell className="whitespace-normal">{item.text}</TableCell>
             </TableRow>

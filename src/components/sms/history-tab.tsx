@@ -36,6 +36,7 @@ export function HistoryTab() {
           <TableRow>
             <TableHead>{text.sentAt}</TableHead>
             <TableHead>{text.type}</TableHead>
+            <TableHead>{text.channel}</TableHead>
             <TableHead>{t.data.phone}</TableHead>
             <TableHead>{t.data.plate}</TableHead>
             <TableHead>{text.status}</TableHead>
@@ -43,12 +44,16 @@ export function HistoryTab() {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {list.rows.length === 0 && <EmptyRow columns={6} />}
+          {list.rows.length === 0 && <EmptyRow columns={7} />}
           {list.rows.map((message) => (
             <TableRow key={message.messageId}>
               <TableCell>{displayDateTime(message.sentAt)}</TableCell>
               <TableCell>
                 <Badge variant="secondary">{text.kinds[message.kind]}</Badge>
+              </TableCell>
+              <TableCell>
+                {/* ITP reminders go by SMS, greetings by WhatsApp. */}
+                {message.kind === "inspection" ? text.channels.sms : text.channels.whatsapp}
               </TableCell>
               <TableCell>{message.phone}</TableCell>
               <TableCell className="font-medium">{message.plate ?? "-"}</TableCell>

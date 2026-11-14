@@ -215,7 +215,12 @@ export const en: Messages = {
     plates: "Cars",
   },
   sms: {
-    tabs: { pending: "To send", history: "History", templates: "Texts" },
+    tabs: {
+      reminders: "ITP reminders · SMS",
+      greetings: "Greetings · WhatsApp",
+      history: "History",
+      templates: "Texts",
+    },
     kinds: {
       inspection: "Inspection expiring",
       christmas: "Christmas",
@@ -231,6 +236,7 @@ export const en: Messages = {
     selectAll: "Select all",
     send: "Send ({count})",
     estimate: "{count} messages selected, estimated time: {duration}",
+    estimateOne: "1 message selected, sent right away",
     rightAway: "right away",
     interval: "Pause between messages",
     intervalMinimum: "The minimum pause is 30 seconds.",

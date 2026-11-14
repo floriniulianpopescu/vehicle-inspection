@@ -215,7 +215,12 @@ export const ro = {
     plates: "Mașini",
   },
   sms: {
-    tabs: { pending: "De trimis", history: "Istoric", templates: "Texte" },
+    tabs: {
+      reminders: "Reamintiri ITP · SMS",
+      greetings: "Felicitări · WhatsApp",
+      history: "Istoric",
+      templates: "Texte",
+    },
     kinds: {
       inspection: "Expirare inspecție",
       christmas: "Crăciun",
@@ -231,6 +236,7 @@ export const ro = {
     selectAll: "Selectează tot",
     send: "Trimite ({count})",
     estimate: "{count} mesaje selectate, durată estimată: {duration}",
+    estimateOne: "1 mesaj selectat, se trimite imediat",
     rightAway: "imediat",
     interval: "Pauză între mesaje",
     intervalMinimum: "Pauza minimă este de 30 de secunde.",
