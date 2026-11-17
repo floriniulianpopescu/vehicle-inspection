@@ -21,6 +21,7 @@ use gateway::Gateway;
 use pending::{CHANNEL_SMS, CHANNEL_WHATSAPP};
 use crate::whatsapp;
 pub use pending::{
+    HistoryFilter,
     MessageImage, PendingMessage, SentMessage, Template, history, remove_template_image, save_template,
     save_template_image, templates,
 };

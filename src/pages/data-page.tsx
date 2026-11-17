@@ -5,6 +5,7 @@ import { ClientsTab } from "@/components/data/clients-tab";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useFocusRefresh } from "@/hooks/use-focus-refresh";
 import { useI18n } from "@/lib/i18n";
 
 const SEARCH_DELAY_MS = 200;
@@ -17,6 +18,8 @@ export function DataPage() {
   const [searchText, setSearchText] = useState("");
   const [search, setSearch] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  // Coming back to the window reloads the lists too.
+  const refreshed = useFocusRefresh();
   const [cars, setCars] = useState(0);
   const [clients, setClients] = useState(0);
 
@@ -28,7 +31,7 @@ export function DataPage() {
   // Any change can affect the other tab, e.g. saving a car links its clients.
   const shared = {
     search,
-    refreshKey,
+    refreshKey: refreshKey + refreshed,
     onChanged: () => setRefreshKey((key) => key + 1),
   };
 

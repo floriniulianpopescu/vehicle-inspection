@@ -14,12 +14,15 @@ export function AutocompleteInput({
   onChange,
   suggestions,
   onPick,
+  pickOnTab = true,
   ...props
 }: Omit<ComponentProps<"input">, "value" | "onChange"> & {
   value: string;
   onChange: (value: string) => void;
   suggestions: Suggestion[];
   onPick: (suggestion: Suggestion) => void;
+  /** Tab picks the highlighted suggestion; otherwise it only moves on. */
+  pickOnTab?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -55,6 +58,8 @@ export function AutocompleteInput({
               event.preventDefault();
               const step = event.key === "ArrowDown" ? 1 : -1;
               setActive((current) => (current + step + suggestions.length) % suggestions.length);
+            } else if (event.key === "Tab" && !pickOnTab) {
+              setOpen(false);
             } else if (event.key === "Enter" || event.key === "Tab") {
               // Enter picks instead of submitting the form; Tab picks and moves on.
               if (event.key === "Enter") event.preventDefault();

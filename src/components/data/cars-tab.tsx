@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { PlusIcon, XIcon } from "lucide-react";
 import { DateRangePicker } from "@/components/date-range-picker";
-import { CarDialog, FREQUENCIES } from "@/components/data/car-dialog";
+import { CarDialog, FREQUENCIES, latestClient } from "@/components/data/car-dialog";
+import { CarDetailsDialog } from "@/components/data/car-details-dialog";
 import { DeleteDialog } from "@/components/data/delete-dialog";
 import { EmptyRow, Pager, RowActions } from "@/components/data/table-parts";
 import { Badge } from "@/components/ui/badge";
@@ -25,10 +27,11 @@ import {
 import { usePagedList } from "@/hooks/use-paged-list";
 import { api, type Car, type CarSort, type RevisionState } from "@/lib/api";
 import { displayDate, fill, parseDate } from "@/lib/format";
+import { formatPhone } from "@/lib/romanian";
 import { useI18n } from "@/lib/i18n";
 
 const STATES: RevisionState[] = ["overdue", "soon", "ok", "unknown"];
-const SORTS: CarSort[] = ["plate", "newest", "oldest"];
+const SORTS: CarSort[] = ["edited", "plate", "newest", "oldest"];
 
 /** Green when the inspection is valid; red when it is expired, expiring soon or unknown. */
 const STATE_BADGE = {
@@ -50,16 +53,20 @@ export function CarsTab({
   const { t } = useI18n();
   const [frequency, setFrequency] = useState("all");
   const [state, setState] = useState("all");
-  const [sort, setSort] = useState<CarSort>("plate");
+  const [sort, setSort] = useState<CarSort>("edited");
   const [fromText, setFromText] = useState("");
   const [toText, setToText] = useState("");
-  const [editing, setEditing] = useState<Car | "new" | null>(null);
+  // `again`: the form was opened with New car, so after saving another empty one opens,
+  // for entering cars one after another. `form` remounts the form each time.
+  const [editing, setEditing] = useState<{ car: Car | null; again: boolean; form: number } | null>(null);
   const [deleting, setDeleting] = useState<Car | null>(null);
+  const [viewing, setViewing] = useState<Car | null>(null);
 
   // An empty date means no limit on that side. A half-typed date is ignored until it is valid.
   const from = parseDate(fromText);
   const to = parseDate(toText);
   const sortLabels: Record<CarSort, string> = {
+    edited: t.data.filters.sortEdited,
     plate: t.data.filters.sortPlate,
     newest: t.data.filters.sortNewest,
     oldest: t.data.filters.sortOldest,
@@ -123,7 +130,7 @@ export function CarsTab({
             ))}
           </SelectContent>
         </Select>
-        <Button className="ml-auto" onClick={() => setEditing("new")}>
+        <Button className="ml-auto" onClick={() => setEditing({ car: null, again: true, form: Date.now() })}>
           <PlusIcon />
           {t.data.newCar}
         </Button>
@@ -188,7 +195,16 @@ export function CarsTab({
         <TableBody>
           {list.rows.length === 0 && <EmptyRow columns={9} />}
           {list.rows.map((car) => (
-            <TableRow key={car.carId}>
+            <TableRow
+              key={car.carId}
+              className="cursor-pointer"
+              tabIndex={0}
+              aria-label={fill(t.data.openDetails, { plate: car.plate })}
+              onClick={() => setViewing(car)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && event.target === event.currentTarget) setViewing(car);
+              }}
+            >
               <TableCell className="font-medium">{car.plate}</TableCell>
               <TableCell>{car.manufacturer}</TableCell>
               <TableCell>{car.model}</TableCell>
@@ -209,10 +225,18 @@ export function CarsTab({
                 {car.notes || "-"}
               </TableCell>
               <TableCell className="whitespace-normal">
-                {car.clients.map((client) => client.label).join(", ")}
+                {/* Only the most recent number; all of them are in the car's details. */}
+                {(() => {
+                  const latest = latestClient(car);
+                  return latest ? formatPhone(latest.label) : "-";
+                })()}
               </TableCell>
-              <TableCell>
-                <RowActions onEdit={() => setEditing(car)} onDelete={() => setDeleting(car)} />
+              {/* The buttons do their own thing, without opening the details too. */}
+              <TableCell onClick={(event) => event.stopPropagation()}>
+                <RowActions
+                  onEdit={() => setEditing({ car, again: false, form: Date.now() })}
+                  onDelete={() => setDeleting(car)}
+                />
               </TableCell>
             </TableRow>
           ))}
@@ -222,11 +246,28 @@ export function CarsTab({
 
       {editing && (
         <CarDialog
-          car={editing === "new" ? null : editing}
+          key={editing.form}
+          car={editing.car}
           onClose={() => setEditing(null)}
-          onSaved={() => {
-            setEditing(null);
+          onOpenExisting={(car) => setEditing({ car, again: editing.again, form: Date.now() })}
+          onSaved={(saved) => {
             onChanged();
+            if (editing.again) {
+              toast.success(fill(t.data.carSaved, { plate: saved.label.split(" · ")[0] }));
+              setEditing({ car: null, again: true, form: Date.now() });
+            } else {
+              setEditing(null);
+            }
+          }}
+        />
+      )}
+      {viewing && (
+        <CarDetailsDialog
+          car={viewing}
+          onClose={() => setViewing(null)}
+          onEdit={() => {
+            setEditing({ car: viewing, again: false, form: Date.now() });
+            setViewing(null);
           }}
         />
       )}

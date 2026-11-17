@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { Report, ReportRequest } from "@/lib/api";
 import { displayDate } from "@/lib/format";
+import { formatPhones } from "@/lib/romanian";
 import { useI18n } from "@/lib/i18n";
 
 /** The width that fits across an A4 page in portrait, with 12 mm margins, at 96 dpi. */
@@ -118,7 +119,7 @@ export function ReportPrint({ report, request }: { report: Report; request: Repo
             t.data.manufacturer,
             t.data.model,
             text.broughtBy,
-            t.data.nextRevision,
+            t.data.frequency,
           ]}
           rows={report.inspected.map((row, index) => [
             index + 1,
@@ -126,8 +127,8 @@ export function ReportPrint({ report, request }: { report: Report; request: Repo
             row.plate,
             row.manufacturer,
             row.model,
-            row.phone ?? t.data.unknownClient,
-            row.nextRevision ? displayDate(row.nextRevision) : "-",
+            row.phone ? formatPhones(row.phone) : t.data.unknownClient,
+            t.data.months[row.revisionFrequency],
           ])}
         />
       </Section>

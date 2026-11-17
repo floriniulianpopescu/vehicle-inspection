@@ -13,9 +13,13 @@ export function AutoSmsPage() {
   const { t } = useI18n();
   // Loaded once for the three message tabs.
   const shared = usePendingMessages();
-  // Reminders WhatsApp could not deliver, waiting to go by SMS.
+  // Reminders WhatsApp could not deliver, still to go by SMS.
   const smsToSend = shared.all.filter(
-    (item) => item.kind === "inspection" && item.channel === "sms" && item.status !== "sent",
+    (item) =>
+      item.kind === "inspection" &&
+      item.channel === "sms" &&
+      item.status !== "sent" &&
+      item.otherStatus === "failed",
   ).length;
   const failedReminders = shared.all.filter(
     (item) => item.kind === "inspection" && item.channel === "whatsapp" && item.status === "failed",

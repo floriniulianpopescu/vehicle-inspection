@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { EntityPicker } from "@/components/data/entity-picker";
 import { Field, FormError, FormWarning } from "@/components/data/field";
-import { isRomanianPhone } from "@/lib/romanian";
+import { formatPhone, isRomanianPhone, typingPhone } from "@/lib/romanian";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -26,7 +26,7 @@ export function ClientDialog({
   onSaved: (client: PickerOption) => void;
 }) {
   const { t } = useI18n();
-  const [phone, setPhone] = useState(client?.phone ?? "");
+  const [phone, setPhone] = useState(client ? formatPhone(client.phone) : "");
   const [cars, setCars] = useState(client?.cars ?? []);
   const [smsOptOut, setSmsOptOut] = useState(client?.smsOptOut ?? false);
   const [error, setError] = useState<string | null>(null);
@@ -54,7 +54,7 @@ export function ClientDialog({
         </DialogHeader>
         <form onSubmit={submit} className="flex flex-col gap-4">
           <Field label={t.data.phone}>
-            <Input value={phone} onChange={(event) => setPhone(event.target.value)} required autoFocus />
+            <Input value={phone} onChange={(event) => setPhone(typingPhone(event.target.value))} required autoFocus />
             <FormWarning message={phone.trim() !== "" && !isRomanianPhone(phone) && t.data.phoneWarning} />
           </Field>
           <EntityPicker

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isRomanianPhone, isRomanianPlate } from "./romanian";
+import { formatPhone, isRomanianPhone, isRomanianPlate, typingPhone } from "./romanian";
 
 describe("plates", () => {
   test("Bucharest takes two or three digits, other counties two", () => {
@@ -29,5 +29,21 @@ describe("phones", () => {
     for (const phone of ["0722 123 45", "07221234567", "+39 333 1234567", "0800123456", "abc"]) {
       expect(isRomanianPhone(phone)).toBe(false);
     }
+  });
+});
+
+describe("phone display", () => {
+  test("ten-digit numbers are shown as 07xx xxx xxx", () => {
+    expect(formatPhone("0722123456")).toBe("0722 123 456");
+    expect(formatPhone("+40722123456")).toBe("0722 123 456");
+    expect(formatPhone("+39 333 1234567")).toBe("+39 333 1234567");
+  });
+
+  test("numbers are spaced while typed", () => {
+    expect(typingPhone("0722")).toBe("0722");
+    expect(typingPhone("07221")).toBe("0722 1");
+    expect(typingPhone("0722 1234")).toBe("0722 123 4");
+    expect(typingPhone("0722123456")).toBe("0722 123 456");
+    expect(typingPhone("Popescu")).toBe("Popescu");
   });
 });

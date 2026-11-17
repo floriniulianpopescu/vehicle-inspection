@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/table";
 import type { DueRow, Report } from "@/lib/api";
 import { displayDate } from "@/lib/format";
+import { formatPhone, formatPhones } from "@/lib/romanian";
 import { useI18n } from "@/lib/i18n";
 
 function Hint({ children }: { children: ReactNode }) {
@@ -29,24 +30,26 @@ export function InspectedTab({ report, controls }: { report: Report; controls: R
       <Table>
         <TableHeader>
           <TableRow>
+            <TableHead className="w-16">{t.reports.rowNumber}</TableHead>
             <TableHead>{t.data.date}</TableHead>
             <TableHead>{t.data.plate}</TableHead>
             <TableHead>{t.data.manufacturer}</TableHead>
             <TableHead>{t.data.model}</TableHead>
             <TableHead>{t.reports.broughtBy}</TableHead>
-            <TableHead>{t.data.nextRevision}</TableHead>
+            <TableHead>{t.data.frequency}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {report.inspected.length === 0 && <EmptyRow columns={6} />}
-          {shown.map((row) => (
+          {report.inspected.length === 0 && <EmptyRow columns={7} />}
+          {shown.map((row, index) => (
             <TableRow key={row.inspectionId}>
+              <TableCell className="text-muted-foreground tabular-nums">{index + 1}</TableCell>
               <TableCell>{displayDate(row.date)}</TableCell>
               <TableCell className="font-medium">{row.plate}</TableCell>
               <TableCell>{row.manufacturer}</TableCell>
               <TableCell>{row.model}</TableCell>
-              <TableCell>{row.phone ?? <span className="text-muted-foreground">{t.data.unknownClient}</span>}</TableCell>
-              <TableCell>{row.nextRevision ? displayDate(row.nextRevision) : "-"}</TableCell>
+              <TableCell>{row.phone ? formatPhones(row.phone) : <span className="text-muted-foreground">{t.data.unknownClient}</span>}</TableCell>
+              <TableCell>{t.data.months[row.revisionFrequency]}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -98,7 +101,7 @@ export function DueTab({
               <TableCell>
                 <Badge variant={expired ? "destructive" : "secondary"}>{car.days}</Badge>
               </TableCell>
-              <TableCell>{car.phones || "-"}</TableCell>
+              <TableCell>{car.phones ? formatPhones(car.phones) : "-"}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -145,7 +148,7 @@ export function RepeatTab({ report }: { report: Report }) {
                   <TableCell>{car.visits}</TableCell>
                   <TableCell>{displayDate(car.firstVisit)}</TableCell>
                   <TableCell>{displayDate(car.lastVisit)}</TableCell>
-                  <TableCell>{car.phones || "-"}</TableCell>
+                  <TableCell>{car.phones ? formatPhones(car.phones) : "-"}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -175,7 +178,7 @@ export function RepeatTab({ report }: { report: Report }) {
               {report.repeatClients.length === 0 && <EmptyRow columns={4} />}
               {clients.shown.map((client) => (
                 <TableRow key={client.clientId}>
-                  <TableCell className="font-medium">{client.phone}</TableCell>
+                  <TableCell className="font-medium">{formatPhone(client.phone)}</TableCell>
                   <TableCell>{client.visits}</TableCell>
                   <TableCell className="whitespace-normal">{client.plates}</TableCell>
                   <TableCell>{displayDate(client.lastVisit)}</TableCell>

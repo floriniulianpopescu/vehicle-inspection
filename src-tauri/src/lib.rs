@@ -65,6 +65,7 @@ pub fn run() {
             commands::save_car,
             commands::preview_delete_client,
             commands::preview_delete_car,
+            commands::car_history,
             commands::delete_client,
             commands::delete_car,
             commands::report,

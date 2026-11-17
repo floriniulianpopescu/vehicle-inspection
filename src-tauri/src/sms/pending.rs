@@ -45,6 +45,10 @@ pub struct PendingMessage {
     pub status: String,
     /// When that last attempt was made.
     pub last_attempt: Option<String>,
+    /// For ITP reminders, which go by either channel: the last attempt through the other
+    /// channel ("unsent", "sent" or "failed") and when it was made.
+    pub other_status: Option<String>,
+    pub other_attempt: Option<String>,
 }
 
 pub const STATUS_UNSENT: &str = "unsent";
@@ -215,33 +219,29 @@ fn due_inspections(conn: &Connection, today: &str, days: i64) -> Result<Vec<Pend
         let text = wording.replace("{plate}", &plate).replace("{date}", &display_date(&due_date));
         let (whatsapp_status, whatsapp_at) = attempt(whatsapp);
         let (sms_status, sms_at) = attempt(sms);
-        let tried_by_whatsapp = whatsapp_status != STATUS_UNSENT;
-        let tried_by_sms = sms_status != STATUS_UNSENT;
-        let message = |channel: &str, status: String, last_attempt: Option<String>| PendingMessage {
-            key: format!("{KIND_INSPECTION}:{channel}:{client_id}:{car_id}"),
-            kind: KIND_INSPECTION.to_string(),
-            channel: channel.to_string(),
-            client_id,
-            car_id: Some(car_id),
-            phone: phone.clone(),
-            text: text.clone(),
-            plate: Some(plate.clone()),
-            due_date: due_date.clone(),
-            has_image: false,
-            status,
-            last_attempt,
+        let message = |channel: &str, own: (&String, &Option<String>), other: (&String, &Option<String>)| {
+            PendingMessage {
+                key: format!("{KIND_INSPECTION}:{channel}:{client_id}:{car_id}"),
+                kind: KIND_INSPECTION.to_string(),
+                channel: channel.to_string(),
+                client_id,
+                car_id: Some(car_id),
+                phone: phone.clone(),
+                text: text.clone(),
+                plate: Some(plate.clone()),
+                due_date: due_date.clone(),
+                has_image: false,
+                status: own.0.clone(),
+                last_attempt: own.1.clone(),
+                other_status: Some(other.0.clone()),
+                other_attempt: other.1.clone(),
+            }
         };
-        // Before WhatsApp existed reminders went by SMS; one already delivered that way counts
-        // as sent here too, so it is not offered again by default.
-        let (status, at) = if !tried_by_whatsapp && sms_status == "sent" {
-            (sms_status.clone(), sms_at.clone())
-        } else {
-            (whatsapp_status.clone(), whatsapp_at)
-        };
-        messages.push(message(CHANNEL_WHATSAPP, status, at));
-        if whatsapp_status == "failed" || tried_by_sms {
-            messages.push(message(CHANNEL_SMS, sms_status, sms_at));
-        }
+        // Every reminder can go by either channel; each copy says how the other one went.
+        let by_whatsapp = (&whatsapp_status, &whatsapp_at);
+        let by_sms = (&sms_status, &sms_at);
+        messages.push(message(CHANNEL_WHATSAPP, by_whatsapp, by_sms));
+        messages.push(message(CHANNEL_SMS, by_sms, by_whatsapp));
     }
     Ok(messages)
 }
@@ -279,13 +279,16 @@ fn due_greetings(conn: &Connection, holiday: &Holiday) -> Result<Vec<PendingMess
             has_image,
             status,
             last_attempt,
+            other_status: None,
+            other_attempt: None,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// A request for feedback for every car inspected today, to whoever brought it, or to every
-/// linked client when that is not known. Each client gets one per inspection.
+/// A request for feedback for every car inspected today whose client agreed to it (the
+/// Feedback box in the car form), to whoever brought it, or to every linked client when that
+/// is not known. Each client gets one per inspection.
 fn due_feedback(conn: &Connection, today: &str) -> Result<Vec<PendingMessage>> {
     let wording = template(conn, KIND_FEEDBACK)?;
     let mut statement = conn.prepare(
@@ -303,7 +306,7 @@ fn due_feedback(conn: &Connection, today: &str) -> Result<Vec<PendingMessage>> {
                JOIN carsclients l ON l.CarID = i2.CarID
                WHERE i2.Date = ?1 AND i2.ClientID IS NULL) r ON r.InspectionID = i.InspectionID
          JOIN clients cl ON cl.ClientID = r.ClientID
-         WHERE i.Date = ?1 AND cl.SmsOptOut = 0
+         WHERE i.Date = ?1 AND cl.SmsOptOut = 0 AND c.Feedback = 1
          ORDER BY c.Plate, cl.Phone",
     )?;
     let rows = statement.query_map([today], |row| {
@@ -325,6 +328,8 @@ fn due_feedback(conn: &Connection, today: &str) -> Result<Vec<PendingMessage>> {
             has_image: false,
             status,
             last_attempt,
+            other_status: None,
+            other_attempt: None,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -375,25 +380,63 @@ pub fn record(conn: &Connection, message: &PendingMessage, sent: bool) -> Result
     Ok(())
 }
 
-/// Messages sent through one channel ("sms" or "whatsapp"), newest first, optionally only
-/// those with one status ("sent" or "failed").
-pub fn history(conn: &Connection, page: i64, channel: &str, status: Option<&str>) -> Result<Page<SentMessage>> {
-    let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE Channel = ?1 AND (?2 IS NULL OR Status = ?2)",
-        params![channel, status],
-        |row| row.get(0),
-    )?;
-    let mut statement = conn.prepare(
-        "SELECT m.MessageID, m.Type, m.Channel, cl.Phone, c.Plate, m.Text, m.SentAt, m.Status
-         FROM messages m
+/// Which sent messages to list.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryFilter {
+    /// "sms" or "whatsapp".
+    pub channel: String,
+    /// "sent" or "failed"; every message when empty.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Matched against the phone, the plate and the text.
+    #[serde(default)]
+    pub search: String,
+    /// Sent between these days, both included.
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+/// Messages sent through one channel, newest first, narrowed by `filter`.
+pub fn history(conn: &Connection, page: i64, filter: &HistoryFilter) -> Result<Page<SentMessage>> {
+    let search = filter.search.trim();
+    let text = (!search.is_empty()).then_some(search);
+    // Phones are stored as digits and plates without spaces, so "0722 123" and "b 12" match.
+    let digits: String = search.chars().filter(char::is_ascii_digit).collect();
+    let digits = (digits.len() >= 3).then_some(digits);
+    let plate: String = search.chars().filter(char::is_ascii_alphanumeric).flat_map(char::to_uppercase).collect();
+    let plate = (!plate.is_empty()).then_some(plate);
+    // ?1 and ?2 are the page; the count leaves them unused.
+    let matching = "FROM messages m
          JOIN clients cl ON cl.ClientID = m.ClientID
          LEFT JOIN cars c ON c.CarID = m.CarID
          WHERE m.Channel = ?3 AND (?4 IS NULL OR m.Status = ?4)
+           AND (?5 IS NULL OR m.Text LIKE '%' || ?5 || '%'
+                OR cl.Phone LIKE '%' || ?6 || '%' OR c.Plate LIKE '%' || ?7 || '%')
+           AND (?8 IS NULL OR substr(m.SentAt, 1, 10) >= ?8)
+           AND (?9 IS NULL OR substr(m.SentAt, 1, 10) <= ?9)";
+    let values = params![
+        data::PAGE_SIZE,
+        page * data::PAGE_SIZE,
+        filter.channel,
+        filter.status,
+        text,
+        digits,
+        plate,
+        filter.from,
+        filter.to
+    ];
+    let total: i64 = conn.query_row(&format!("SELECT COUNT(*) {matching}"), values, |row| row.get(0))?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT m.MessageID, m.Type, m.Channel, cl.Phone, c.Plate, m.Text, m.SentAt, m.Status
+         {matching}
          ORDER BY m.SentAt DESC, m.MessageID DESC
-         LIMIT ?1 OFFSET ?2",
-    )?;
+         LIMIT ?1 OFFSET ?2"
+    ))?;
     let rows = statement
-        .query_map(params![data::PAGE_SIZE, page * data::PAGE_SIZE, channel, status], |row| {
+        .query_map(values, |row| {
             Ok(SentMessage {
                 message_id: row.get(0)?,
                 kind: row.get(1)?,
@@ -487,8 +530,8 @@ mod tests {
 
     fn add_car(conn: &Connection, plate: &str, last: Option<&str>) -> i64 {
         conn.execute(
-            "INSERT INTO cars (Plate, Manufacturer, Model, LastRevision, RevisionFrequency)
-             VALUES (?1, 'Dacia', 'Logan', ?2, 12)",
+            "INSERT INTO cars (Plate, Manufacturer, Model, LastRevision, RevisionFrequency, Feedback)
+             VALUES (?1, 'Dacia', 'Logan', ?2, 12, 1)",
             params![plate, last],
         )
         .unwrap();
@@ -526,12 +569,13 @@ mod tests {
         .unwrap();
     }
 
-    /// What is still to send: everything not sent yet, reminders by their first channel.
+    /// What is still to send: everything not sent yet; a reminder counts once, and is done
+    /// when it went through either channel.
     fn phones_on(conn: &Connection, today: &str) -> Vec<(String, String)> {
         pending_at(conn, today, DAYS)
             .unwrap()
             .into_iter()
-            .filter(|message| message.status != "sent")
+            .filter(|message| message.status != "sent" && message.other_status.as_deref() != Some("sent"))
             .filter(|message| message.kind != KIND_INSPECTION || message.channel == CHANNEL_WHATSAPP)
             .map(|message| (message.kind, message.phone))
             .collect()
@@ -605,7 +649,8 @@ mod tests {
 
         assert!(phones(&conn).is_empty());
         let found = pending_at(&conn, TODAY, MAX_REMINDER_DAYS).unwrap();
-        assert_eq!(found.len(), 1);
+        // Once for WhatsApp and once for SMS.
+        assert_eq!(found.len(), 2);
         assert!(pending_at(&conn, TODAY, MAX_REMINDER_DAYS - 1).unwrap().is_empty());
     }
 
@@ -662,6 +707,16 @@ mod tests {
             .unwrap();
         assert_eq!(message.channel, CHANNEL_WHATSAPP);
         assert!(message.text.contains("B1AAA"), "{}", message.text);
+    }
+
+    #[test]
+    fn feedback_is_only_asked_for_cars_marked_for_it() {
+        let conn = test_connection();
+        let car = add_car(&conn, "B1AAA", Some(TODAY));
+        conn.execute("UPDATE cars SET Feedback = 0 WHERE CarID = ?1", [car]).unwrap();
+        let driver = add_client(&conn, "0722000001", Some(car));
+        inspect(&conn, Some(driver), car, TODAY);
+        assert!(kinds_on(&conn, TODAY, "feedback").is_empty());
     }
 
     #[test]
@@ -840,16 +895,54 @@ mod tests {
         log(&conn, client, Some(car), "inspection", "2030-06-15T10:00:00", "sent");
         log_by(&conn, client, None, "christmas", "2030-06-15T11:00:00", "sent", CHANNEL_WHATSAPP);
 
-        let sms = history(&conn, 0, CHANNEL_SMS, None).unwrap();
+        let by = |channel: &str, status: Option<&str>| {
+            history(
+                &conn,
+                0,
+                &HistoryFilter {
+                    channel: channel.into(),
+                    status: status.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let sms = by(CHANNEL_SMS, None);
         assert_eq!(sms.total, 2);
         assert_eq!(sms.rows[0].status, "sent");
         assert_eq!(sms.rows[1].plate.as_deref(), Some("B1AAA"));
-        let failed = history(&conn, 0, CHANNEL_SMS, Some("failed")).unwrap();
+        let failed = by(CHANNEL_SMS, Some("failed"));
         assert_eq!(failed.total, 1);
         assert_eq!(failed.rows[0].status, "failed");
-        let whatsapp = history(&conn, 0, CHANNEL_WHATSAPP, None).unwrap();
+        let whatsapp = by(CHANNEL_WHATSAPP, None);
         assert_eq!(whatsapp.total, 1);
         assert_eq!(whatsapp.rows[0].kind, "christmas");
+    }
+
+    #[test]
+    fn history_can_be_searched_and_limited_to_days() {
+        let conn = test_connection();
+        let car = add_car(&conn, "B12ABC", None);
+        let client = add_client(&conn, "0722000001", Some(car));
+        let other = add_client(&conn, "0733000002", None);
+        log(&conn, client, Some(car), "inspection", "2030-06-14T10:00:00", "sent");
+        log(&conn, other, None, "inspection", "2030-06-20T10:00:00", "sent");
+        let found = |search: &str, from: Option<&str>, to: Option<&str>| {
+            let filter = HistoryFilter {
+                channel: CHANNEL_SMS.into(),
+                search: search.into(),
+                from: from.map(str::to_string),
+                to: to.map(str::to_string),
+                ..Default::default()
+            };
+            history(&conn, 0, &filter).unwrap().total
+        };
+        assert_eq!(found("", None, None), 2);
+        assert_eq!(found("0722 000", None, None), 1);
+        assert_eq!(found("b 12", None, None), 1);
+        assert_eq!(found("", Some("2030-06-15"), None), 1);
+        assert_eq!(found("", Some("2030-06-14"), Some("2030-06-14")), 1);
+        assert_eq!(found("nimic", None, None), 0);
     }
 
     fn reminders(conn: &Connection) -> Vec<(String, String)> {
@@ -866,29 +959,24 @@ mod tests {
     }
 
     #[test]
-    fn reminders_go_by_whatsapp_first_and_by_sms_after_a_whatsapp_failure() {
+    fn every_reminder_can_go_by_whatsapp_or_sms_and_shows_how_the_other_went() {
         let conn = test_connection();
         let car = add_car(&conn, "B1AAA", Some("2029-07-15"));
         let client = add_client(&conn, "0722000001", Some(car));
-        assert_eq!(reminders(&conn), [pair(CHANNEL_WHATSAPP, "unsent")]);
+        assert_eq!(reminders(&conn), [pair(CHANNEL_WHATSAPP, "unsent"), pair(CHANNEL_SMS, "unsent")]);
 
         log_by(&conn, client, Some(car), "inspection", "2030-06-10T10:00:00", "failed", CHANNEL_WHATSAPP);
-        assert_eq!(reminders(&conn), [pair(CHANNEL_WHATSAPP, "failed"), pair(CHANNEL_SMS, "unsent")]);
-
         log(&conn, client, Some(car), "inspection", "2030-06-11T10:00:00", "sent");
         assert_eq!(reminders(&conn), [pair(CHANNEL_WHATSAPP, "failed"), pair(CHANNEL_SMS, "sent")]);
-        let sms = pending_at(&conn, TODAY, DAYS).unwrap().into_iter().find(|m| m.channel == CHANNEL_SMS).unwrap();
+
+        let all = pending_at(&conn, TODAY, DAYS).unwrap();
+        let whatsapp = all.iter().find(|m| m.channel == CHANNEL_WHATSAPP).unwrap();
+        assert_eq!(whatsapp.other_status.as_deref(), Some("sent"));
+        assert_eq!(whatsapp.other_attempt.as_deref(), Some("2030-06-11T10:00:00"));
+        let sms = all.iter().find(|m| m.channel == CHANNEL_SMS).unwrap();
         assert_eq!(sms.key, format!("inspection:sms:{client}:{car}"));
         assert_eq!(sms.last_attempt.as_deref(), Some("2030-06-11T10:00:00"));
-    }
-
-    #[test]
-    fn a_whatsapp_reminder_that_went_through_offers_no_sms() {
-        let conn = test_connection();
-        let car = add_car(&conn, "B1AAA", Some("2029-07-15"));
-        let client = add_client(&conn, "0722000001", Some(car));
-        log_by(&conn, client, Some(car), "inspection", "2030-06-10T10:00:00", "sent", CHANNEL_WHATSAPP);
-        assert_eq!(reminders(&conn), [pair(CHANNEL_WHATSAPP, "sent")]);
+        assert_eq!(sms.other_status.as_deref(), Some("failed"));
     }
 
     #[test]

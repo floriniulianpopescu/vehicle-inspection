@@ -33,6 +33,34 @@ export function nationalPhone(phone: string): string {
   return compact;
 }
 
+/** A ten-digit Romanian number shown as "0722 123 456"; anything else is left as written. */
+export function formatPhone(phone: string): string {
+  const national = nationalPhone(phone);
+  if (!/^0\d{9}$/.test(national)) return phone;
+  return `${national.slice(0, 4)} ${national.slice(4, 7)} ${national.slice(7)}`;
+}
+
+/** Several numbers in one text, "0722123456, 0733123456", each shown as above. */
+export function formatPhones(phones: string): string {
+  return phones
+    .split(",")
+    .map((phone) => formatPhone(phone.trim()))
+    .join(", ");
+}
+
+/**
+ * Spaces a number while it is typed: "0722123" becomes "0722 123". Only plain numbers
+ * starting with 0 are touched, so searching by other text still works.
+ */
+export function typingPhone(text: string): string {
+  if (!/^0[\d\s]*$/.test(text)) return text;
+  const digits = text.replace(/\s/g, "");
+  const groups = [digits.slice(0, 4), digits.slice(4, 7), digits.slice(7)].filter(Boolean);
+  // Keep a space the person just typed after a full group.
+  const spaced = groups.join(" ");
+  return text.endsWith(" ") && (digits.length === 4 || digits.length === 7) ? `${spaced} ` : spaced;
+}
+
 /** A Romanian mobile (07…) or landline (02…, 03…) number: ten digits. */
 export function isRomanianPhone(phone: string): boolean {
   return /^0[237]\d{8}$/.test(nationalPhone(phone));

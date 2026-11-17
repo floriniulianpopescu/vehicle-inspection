@@ -28,6 +28,7 @@ import {
   type ReportRequest,
 } from "@/lib/api";
 import { displayDate, fill, parseDate, todayIso } from "@/lib/format";
+import { useFocusRefresh } from "@/hooks/use-focus-refresh";
 import { useI18n } from "@/lib/i18n";
 import { monthRange, weekRange, yearRange, type DateRange } from "@/lib/reports";
 import type { Messages } from "@/locales/ro";
@@ -47,6 +48,9 @@ function storedDays(): number {
 function exportLabels(t: Messages): ReportExportLabels {
   const text = t.reports;
   return {
+    rowNumber: text.rowNumber,
+    frequency: t.data.frequency,
+    months: Object.fromEntries(Object.entries(t.data.months).map(([months, name]) => [months, name])),
     sheetInspected: text.sheets.inspected,
     sheetExpiring: text.sheets.expiring,
     sheetExpired: text.sheets.expired,
@@ -115,6 +119,8 @@ export function ReportsPage() {
     [range, days, frequency],
   );
 
+  const refreshed = useFocusRefresh();
+
   useEffect(() => {
     if (!request) {
       setError(t.data.errors.invalid_date);
@@ -134,7 +140,7 @@ export function ReportsPage() {
     return () => {
       current = false;
     };
-  }, [request, t]);
+  }, [request, t, refreshed]);
 
   function choose(next: DateRange) {
     setFromText(displayDate(next.from));

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { FormError } from "@/components/data/field";
+import { useMessageFilters } from "@/components/sms/message-filters";
 import { EmptyRow, Pager } from "@/components/data/table-parts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,7 @@ import {
 } from "@/components/ui/table";
 import { api, errorMessage, type Page, type SentMessage } from "@/lib/api";
 import { displayDateTime } from "@/lib/format";
+import { formatPhone } from "@/lib/romanian";
 import { useI18n } from "@/lib/i18n";
 
 type StatusFilter = "all" | "sent" | "failed";
@@ -26,17 +28,35 @@ export function HistoryTab({ channel }: { channel: "sms" | "whatsapp" }) {
   const [list, setList] = useState<Page<SentMessage>>({ rows: [], total: 0 });
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const filters = useMessageFilters(text.sentAt);
+  const { search, from, to } = filters;
+
+  // A new search or period starts again from the first page.
+  useEffect(() => setPage(0), [filters.key]);
 
   useEffect(() => {
+    let current = true;
     api
-      .smsHistory(page, channel, statusFilter === "all" ? null : statusFilter)
-      .then(setList)
-      .catch((failure) => setError(errorMessage(t, failure)));
-  }, [page, channel, statusFilter, t]);
+      .smsHistory(page, {
+        channel,
+        status: statusFilter === "all" ? null : statusFilter,
+        search,
+        from,
+        to,
+      })
+      .then((next) => {
+        if (current) setList(next);
+      })
+      .catch((failure) => current && setError(errorMessage(t, failure)));
+    return () => {
+      current = false;
+    };
+  }, [page, channel, statusFilter, search, from, to, t]);
 
   return (
     <div className="flex flex-col gap-3">
       <FormError message={error} />
+      {filters.bar}
       <div role="radiogroup" aria-label={text.status} className="flex flex-wrap gap-1">
         {STATUS_FILTERS.map((value) => (
           <Button
@@ -73,7 +93,7 @@ export function HistoryTab({ channel }: { channel: "sms" | "whatsapp" }) {
               <TableCell>
                 <Badge variant="secondary">{text.kinds[message.kind]}</Badge>
               </TableCell>
-              <TableCell>{message.phone}</TableCell>
+              <TableCell className="whitespace-nowrap">{formatPhone(message.phone)}</TableCell>
               <TableCell className="font-medium">{message.plate ?? "-"}</TableCell>
               <TableCell>
                 <Badge variant={message.status === "sent" ? "outline" : "destructive"}>

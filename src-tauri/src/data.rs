@@ -95,6 +95,12 @@ pub struct Car {
     revision_state: String,
     /// The client who brought the car to its last inspection, when known.
     inspected_by: Option<i64>,
+    /// When the car was added to the app.
+    created_at: Option<String>,
+    /// When the car was last added or edited.
+    updated_at: Option<String>,
+    /// The client agreed to be asked for feedback after the inspection.
+    feedback: bool,
     clients: Vec<PickerOption>,
 }
 
@@ -116,9 +122,13 @@ pub struct CarFilter {
     revision_from: Option<String>,
     #[serde(default)]
     revision_to: Option<String>,
-    /// "newest" or "oldest" last inspection first; by plate otherwise.
+    /// "edited" (most recently added or edited first, the default), "plate", or "newest" /
+    /// "oldest" last inspection first.
     #[serde(default)]
     sort: Option<String>,
+    /// Only plates starting with this, as typed in the car form (spaces and dashes ignored).
+    #[serde(default)]
+    plate_prefix: Option<String>,
     page: i64,
 }
 
@@ -142,6 +152,8 @@ pub struct CarInput {
     revision_frequency: i64,
     #[serde(default)]
     notes: String,
+    #[serde(default)]
+    feedback: bool,
     client_ids: Vec<i64>,
     /// Who brought the car to the inspection on `last_revision`.
     #[serde(default)]
@@ -153,6 +165,34 @@ pub struct CarInput {
     /// Set instead of `inspected_by` when the car was brought by one of `new_phones`.
     #[serde(default)]
     inspected_by_phone: Option<String>,
+}
+
+/// One recorded inspection of a car.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectionEntry {
+    date: String,
+    /// Who brought the car, when known.
+    phone: Option<String>,
+}
+
+/// One message sent (or tried) about a car.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarMessage {
+    sent_at: String,
+    kind: String,
+    channel: String,
+    status: String,
+    phone: String,
+}
+
+/// Everything recorded over time for one car, for its details window.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarHistory {
+    inspections: Vec<InspectionEntry>,
+    messages: Vec<CarMessage>,
 }
 
 #[derive(Serialize)]
@@ -250,6 +290,20 @@ fn normalize_phone(phone: &str) -> Result<String> {
     } else {
         Err(AppError::code("invalid_phone"))
     }
+}
+
+/// A ten-digit Romanian number as people write it, "0722 123 456"; others as stored.
+pub(crate) fn display_phone(phone: &str) -> String {
+    if phone.len() == 10 && phone.starts_with('0') && phone.bytes().all(|b| b.is_ascii_digit()) {
+        format!("{} {} {}", &phone[..4], &phone[4..7], &phone[7..])
+    } else {
+        phone.to_string()
+    }
+}
+
+/// Several numbers joined with ", ", each shown as `display_phone` does.
+pub(crate) fn display_phones(phones: &str) -> String {
+    phones.split(", ").map(display_phone).collect::<Vec<_>>().join(", ")
 }
 
 fn normalize_plate(plate: &str) -> Result<String> {
@@ -378,18 +432,24 @@ pub fn list_cars(conn: &Connection, input: CarFilter) -> Result<Page<Car>> {
     if let Some(to) = input.revision_to {
         filter.add("c.LastRevision <= ?".into(), to);
     }
+    if let Some(prefix) = input.plate_prefix {
+        let prefix: String =
+            prefix.chars().filter(char::is_ascii_alphanumeric).flat_map(char::to_uppercase).collect();
+        filter.add("c.Plate LIKE ? || '%'".into(), prefix);
+    }
     // Cars with no known date always come last.
     let order = match input.sort.as_deref() {
         Some("newest") => "c.LastRevision IS NULL, c.LastRevision DESC, c.Plate",
         Some("oldest") => "c.LastRevision IS NULL, c.LastRevision ASC, c.Plate",
-        _ => "c.Plate",
+        Some("plate") => "c.Plate",
+        _ => "c.UpdatedAt IS NULL, c.UpdatedAt DESC, c.CarID DESC",
     };
 
     let select = format!(
         "SELECT c.CarID, c.Plate, c.Manufacturer, c.Model, c.LastRevision, c.RevisionFrequency,
                 {NEXT_REVISION}, {state},
                 (SELECT i.ClientID FROM inspections i WHERE i.CarID = c.CarID AND i.Date = c.LastRevision),
-                c.Notes
+                c.Notes, c.CreatedAt, c.Feedback, c.UpdatedAt
          FROM cars c"
     );
     let mut rows = filter.rows(conn, &select, order, input.page, |r| {
@@ -404,6 +464,9 @@ pub fn list_cars(conn: &Connection, input: CarFilter) -> Result<Page<Car>> {
             revision_state: r.get(7)?,
             inspected_by: r.get(8)?,
             notes: r.get(9)?,
+            created_at: r.get(10)?,
+            feedback: r.get(11)?,
+            updated_at: r.get(12)?,
             clients: Vec::new(),
         })
     })?;
@@ -533,7 +596,8 @@ pub fn save_car(conn: &mut Connection, input: CarInput) -> Result<PickerOption> 
             let changed = tx
                 .execute(
                     "UPDATE cars SET Plate = ?1, Manufacturer = ?2, Model = ?3, LastRevision = ?4,
-                     RevisionFrequency = ?5, Notes = ?6 WHERE CarID = ?7",
+                     RevisionFrequency = ?5, Notes = ?6, Feedback = ?8,
+                     UpdatedAt = strftime('%Y-%m-%dT%H:%M:%f', 'now', 'localtime') WHERE CarID = ?7",
                     params![
                         plate,
                         manufacturer,
@@ -541,7 +605,8 @@ pub fn save_car(conn: &mut Connection, input: CarInput) -> Result<PickerOption> 
                         input.last_revision,
                         input.revision_frequency,
                         notes,
-                        id
+                        id,
+                        input.feedback
                     ],
                 )
                 .map_err(duplicate_as("plate_exists"))?;
@@ -550,9 +615,19 @@ pub fn save_car(conn: &mut Connection, input: CarInput) -> Result<PickerOption> 
         }
         None => {
             tx.execute(
-                "INSERT INTO cars (Plate, Manufacturer, Model, LastRevision, RevisionFrequency, Notes)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![plate, manufacturer, model, input.last_revision, input.revision_frequency, notes],
+                "INSERT INTO cars (Plate, Manufacturer, Model, LastRevision, RevisionFrequency, Notes,
+                                   Feedback, CreatedAt, UpdatedAt)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'),
+                         strftime('%Y-%m-%dT%H:%M:%f', 'now', 'localtime'))",
+                params![
+                    plate,
+                    manufacturer,
+                    model,
+                    input.last_revision,
+                    input.revision_frequency,
+                    notes,
+                    input.feedback
+                ],
             )
             .map_err(duplicate_as("plate_exists"))?;
             tx.last_insert_rowid()
@@ -578,6 +653,35 @@ pub fn save_car(conn: &mut Connection, input: CarInput) -> Result<PickerOption> 
         label: format!("{plate} · {manufacturer} {model}"),
         linked: false,
     })
+}
+
+/// The car's inspections and messages, newest first.
+pub fn car_history(conn: &Connection, car_id: i64) -> Result<CarHistory> {
+    let mut statement = conn.prepare(
+        "SELECT i.Date, cl.Phone FROM inspections i
+         LEFT JOIN clients cl ON cl.ClientID = i.ClientID
+         WHERE i.CarID = ?1 ORDER BY i.Date DESC",
+    )?;
+    let inspections = statement
+        .query_map([car_id], |r| Ok(InspectionEntry { date: r.get(0)?, phone: r.get(1)? }))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut statement = conn.prepare(
+        "SELECT m.SentAt, m.Type, m.Channel, m.Status, cl.Phone FROM messages m
+         JOIN clients cl ON cl.ClientID = m.ClientID
+         WHERE m.CarID = ?1 ORDER BY m.SentAt DESC, m.MessageID DESC",
+    )?;
+    let messages = statement
+        .query_map([car_id], |r| {
+            Ok(CarMessage {
+                sent_at: r.get(0)?,
+                kind: r.get(1)?,
+                channel: r.get(2)?,
+                status: r.get(3)?,
+                phone: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(CarHistory { inspections, messages })
 }
 
 /// The client with this (normalized) phone, created if there is none.
@@ -686,6 +790,7 @@ mod tests {
             client_ids: vec![],
             inspected_by: None,
             notes: String::new(),
+            feedback: false,
             new_phones: vec![],
             inspected_by_phone: None,
         }
@@ -706,9 +811,77 @@ mod tests {
             revision_state: None,
             revision_from: None,
             revision_to: None,
-            sort: None,
+            sort: Some("plate".into()),
+            plate_prefix: None,
             page: 0,
         }
+    }
+
+    #[test]
+    fn a_car_history_lists_every_inspection_newest_first() {
+        let mut conn = test_connection();
+        let id = save_car(&mut conn, car_input("B1AAA", Some("2024-05-01"), 12)).unwrap().id;
+        save_car(&mut conn, CarInput { car_id: Some(id), ..car_input("B1AAA", Some("2025-05-02"), 12) })
+            .unwrap();
+        let history = car_history(&conn, id).unwrap();
+        let dates: Vec<&str> = history.inspections.iter().map(|entry| entry.date.as_str()).collect();
+        assert_eq!(dates, ["2025-05-02", "2024-05-01"]);
+        assert!(history.messages.is_empty());
+    }
+
+    #[test]
+    fn phones_are_shown_spaced() {
+        assert_eq!(display_phone("0722123456"), "0722 123 456");
+        assert_eq!(display_phone("+393331234567"), "+393331234567");
+        assert_eq!(display_phones("0722000000, 0733000000"), "0722 000 000, 0733 000 000");
+    }
+
+    #[test]
+    fn an_edited_car_moves_to_the_top() {
+        let mut conn = test_connection();
+        let first = car(&mut conn, "B1AAA");
+        car(&mut conn, "B2AAA");
+        // Times are kept to the millisecond.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        save_car(&mut conn, CarInput { car_id: Some(first), notes: "GPL".into(), ..car_input("B1AAA", None, 12) })
+            .unwrap();
+        let page = list_cars(&conn, CarFilter { sort: None, ..car_filter("") }).unwrap();
+        assert_eq!(plates(page), ["B1AAA", "B2AAA"]);
+    }
+
+    #[test]
+    fn cars_list_the_most_recently_added_first_by_default() {
+        let mut conn = test_connection();
+        for plate in ["B2AAA", "B1AAA", "B3AAA"] {
+            car(&mut conn, plate);
+        }
+        // Added in the same second: the later one still comes first.
+        let page = list_cars(&conn, CarFilter { sort: None, ..car_filter("") }).unwrap();
+        assert!(page.rows.iter().all(|car| car.created_at.is_some()));
+        assert_eq!(plates(page), ["B3AAA", "B1AAA", "B2AAA"]);
+    }
+
+    #[test]
+    fn cars_can_be_looked_up_by_the_start_of_the_plate() {
+        let mut conn = test_connection();
+        for plate in ["B123ABC", "B12XYZ", "CJ12ABC"] {
+            car(&mut conn, plate);
+        }
+        let found = |prefix: &str| {
+            plates(list_cars(&conn, CarFilter { plate_prefix: Some(prefix.into()), ..car_filter("") }).unwrap())
+        };
+        assert_eq!(found("b 12"), ["B123ABC", "B12XYZ"]);
+        assert_eq!(found("b-123"), ["B123ABC"]);
+        assert!(found("12").is_empty());
+    }
+
+    #[test]
+    fn the_feedback_choice_is_saved() {
+        let mut conn = test_connection();
+        let id = save_car(&mut conn, CarInput { feedback: true, ..car_input("B1AAA", None, 12) }).unwrap().id;
+        assert!(cars_page(&conn, "B1AAA", None).rows[0].feedback);
+        save_car(&mut conn, CarInput { car_id: Some(id), ..car_input("B1AAA", None, 12) }).unwrap();
+        assert!(!cars_page(&conn, "B1AAA", None).rows[0].feedback);
     }
 
     fn cars_page(conn: &Connection, search: &str, state: Option<&str>) -> Page<Car> {

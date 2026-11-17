@@ -16,6 +16,7 @@ import {
 import { usePagedList } from "@/hooks/use-paged-list";
 import { api, type Client } from "@/lib/api";
 import { fill } from "@/lib/format";
+import { formatPhone } from "@/lib/romanian";
 import { useI18n } from "@/lib/i18n";
 
 export function ClientsTab({
@@ -59,7 +60,7 @@ export function ClientsTab({
             <TableRow key={client.clientId}>
               <TableCell>
                 <div className="flex items-center gap-2">
-                  {client.phone}
+                  {formatPhone(client.phone)}
                   {client.smsOptOut && <Badge variant="outline">{t.data.noSms}</Badge>}
                 </div>
               </TableCell>
@@ -93,7 +94,7 @@ export function ClientsTab({
       )}
       {deleting && (
         <DeleteDialog
-          title={fill(t.data.deleteClient, { name: deleting.phone })}
+          title={fill(t.data.deleteClient, { name: formatPhone(deleting.phone) })}
           loadPreview={() => api.previewDeleteClient(deleting.clientId)}
           onConfirm={() => api.deleteClient(deleting.clientId)}
           onClose={() => setDeleting(null)}

@@ -49,6 +49,7 @@ import {
   type ChartType,
 } from "@/lib/dashboard";
 import { displayDate, parseDate, todayIso } from "@/lib/format";
+import { useFocusRefresh } from "@/hooks/use-focus-refresh";
 import { useI18n } from "@/lib/i18n";
 import { monthRange, yearRange, type DateRange } from "@/lib/reports";
 
@@ -95,6 +96,7 @@ function ChartCard({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const info = metricInfo(config.metric);
+  const refreshed = useFocusRefresh();
 
   useEffect(() => {
     if (!filters) return;
@@ -112,7 +114,7 @@ function ChartCard({
     return () => {
       current = false;
     };
-  }, [filters, config.metric, config.grouping, t]);
+  }, [filters, config.metric, config.grouping, t, refreshed]);
 
   const data: Datum[] = (series?.points ?? []).map((point) => ({
     key: point.key,
@@ -271,6 +273,8 @@ export function DashboardPage() {
     [range, frequency, manufacturer],
   );
 
+  const refreshed = useFocusRefresh();
+
   useEffect(() => {
     if (!filters) {
       setError(t.data.errors.invalid_date);
@@ -288,7 +292,7 @@ export function DashboardPage() {
     return () => {
       current = false;
     };
-  }, [filters, t]);
+  }, [filters, t, refreshed]);
 
   function update(next: ChartConfig[]) {
     setCharts(next);

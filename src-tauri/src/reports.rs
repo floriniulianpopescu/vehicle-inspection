@@ -42,6 +42,8 @@ pub struct InspectedRow {
     /// Who brought the car, when known.
     phone: Option<String>,
     next_revision: Option<String>,
+    /// Months between inspections: 6, 12, 24 or 36.
+    revision_frequency: i64,
 }
 
 #[derive(Serialize)]
@@ -117,15 +119,20 @@ fn frequency_filter(n: usize) -> String {
 
 fn inspected(conn: &Connection, request: &ReportRequest) -> Result<Vec<InspectedRow>> {
     let sql = format!(
-        "SELECT i.InspectionID, i.Date, c.CarID, c.Plate, c.Manufacturer, c.Model, cl.Phone,
-                {next}
+        "SELECT i.InspectionID, i.Date, c.CarID, c.Plate, c.Manufacturer, c.Model,
+                -- Who brought the car; when that was not recorded, the car's numbers as they
+                -- are now, so a number linked later still shows.
+                COALESCE(cl.Phone, NULLIF({phones}, '')),
+                {next}, c.RevisionFrequency
          FROM inspections i
          JOIN cars c ON c.CarID = i.CarID
          LEFT JOIN clients cl ON cl.ClientID = i.ClientID
          WHERE i.Date BETWEEN ?1 AND ?2 AND {frequency}
-         ORDER BY i.Date DESC, c.Plate",
+         -- The most recently recorded first.
+         ORDER BY i.InspectionID DESC",
         next = data::NEXT_REVISION,
         frequency = frequency_filter(3),
+        phones = CAR_PHONES,
     );
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params![request.from, request.to, request.frequency], |row| {
@@ -138,6 +145,7 @@ fn inspected(conn: &Connection, request: &ReportRequest) -> Result<Vec<Inspected
             model: row.get(5)?,
             phone: row.get(6)?,
             next_revision: row.get(7)?,
+            revision_frequency: row.get(8)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -298,6 +306,10 @@ pub struct ExportLabels {
     first_visit: String,
     last_visit: String,
     plates: String,
+    row_number: String,
+    frequency: String,
+    /// What each frequency is called, by its months ("12" → "1 an").
+    months: std::collections::HashMap<String, String>,
 }
 
 struct Formats {
@@ -364,22 +376,25 @@ fn write_inspected(
     formats: &Formats,
 ) -> std::result::Result<(), XlsxError> {
     let columns = [
-        (labels.date.as_str(), 13.0),
+        (labels.row_number.as_str(), 8.0),
+        (&labels.date, 13.0),
         (&labels.plate, 13.0),
         (&labels.manufacturer, 16.0),
         (&labels.model, 16.0),
         (&labels.brought_by, 18.0),
-        (&labels.next_revision, 22.0),
+        (&labels.frequency, 12.0),
     ];
     start_sheet(sheet, &columns, report.inspected.len(), formats)?;
     for (index, item) in report.inspected.iter().enumerate() {
         let row = index as u32 + 1;
-        write_date(sheet, row, 0, Some(&item.date), &formats.date)?;
-        sheet.write_string(row, 1, &item.plate)?;
-        sheet.write_string(row, 2, &item.manufacturer)?;
-        sheet.write_string(row, 3, &item.model)?;
-        sheet.write_string(row, 4, item.phone.as_deref().unwrap_or("-"))?;
-        write_date(sheet, row, 5, item.next_revision.as_deref(), &formats.date)?;
+        sheet.write_number(row, 0, f64::from(row))?;
+        write_date(sheet, row, 1, Some(&item.date), &formats.date)?;
+        sheet.write_string(row, 2, &item.plate)?;
+        sheet.write_string(row, 3, &item.manufacturer)?;
+        sheet.write_string(row, 4, &item.model)?;
+        sheet.write_string(row, 5, item.phone.as_deref().map_or("-".into(), data::display_phones))?;
+        let months = item.revision_frequency.to_string();
+        sheet.write_string(row, 6, labels.months.get(&months).unwrap_or(&months))?;
     }
     Ok(())
 }
@@ -412,7 +427,7 @@ fn write_due(
         write_date(sheet, row, 3, Some(&car.last_revision), &formats.date)?;
         write_date(sheet, row, 4, Some(&car.next_revision), &next_format)?;
         sheet.write_number_with_format(row, 5, car.days as f64, &formats.number)?;
-        sheet.write_string(row, 6, &car.phones)?;
+        sheet.write_string(row, 6, data::display_phones(&car.phones))?;
     }
     Ok(())
 }
@@ -441,7 +456,7 @@ fn write_repeat_cars(
         sheet.write_number_with_format(row, 3, car.visits as f64, &formats.number)?;
         write_date(sheet, row, 4, Some(&car.first_visit), &formats.date)?;
         write_date(sheet, row, 5, Some(&car.last_visit), &formats.date)?;
-        sheet.write_string(row, 6, &car.phones)?;
+        sheet.write_string(row, 6, data::display_phones(&car.phones))?;
     }
     Ok(())
 }
@@ -461,7 +476,7 @@ fn write_repeat_clients(
     start_sheet(sheet, &columns, report.repeat_clients.len(), formats)?;
     for (index, client) in report.repeat_clients.iter().enumerate() {
         let row = index as u32 + 1;
-        sheet.write_string(row, 0, &client.phone)?;
+        sheet.write_string(row, 0, data::display_phone(&client.phone))?;
         sheet.write_number_with_format(row, 1, client.visits as f64, &formats.number)?;
         sheet.write_string(row, 2, &client.plates)?;
         write_date(sheet, row, 3, Some(&client.last_visit), &formats.date)?;
@@ -581,7 +596,24 @@ mod tests {
     }
 
     #[test]
-    fn inspections_list_both_end_days_newest_first() {
+    fn an_inspection_without_a_known_client_shows_the_numbers_linked_later() {
+        let conn = test_connection();
+        let car = add_car(&conn, "B1AAA", Some("2030-06-05"), 12);
+        inspect(&conn, None, car, "2030-06-05");
+        let alone = add_car(&conn, "B2AAA", Some("2030-06-05"), 12);
+        inspect(&conn, None, alone, "2030-06-05");
+        // Linked after the inspection was saved.
+        add_client(&conn, "0733000000", Some(car));
+        add_client(&conn, "0722000000", Some(car));
+
+        let found = report(&conn, &request("2030-06-01", "2030-06-10", 30));
+        let phones: Vec<(&str, Option<&str>)> =
+            found.inspected.iter().map(|row| (row.plate.as_str(), row.phone.as_deref())).collect();
+        assert_eq!(phones, [("B2AAA", None), ("B1AAA", Some("0722000000, 0733000000"))]);
+    }
+
+    #[test]
+    fn inspections_list_both_end_days_most_recently_recorded_first() {
         let conn = test_connection();
         let car = add_car(&conn, "B1AAA", Some("2030-06-01"), 12);
         let client = add_client(&conn, "0722000000", Some(car));
@@ -598,14 +630,16 @@ mod tests {
             .iter()
             .map(|row| (row.date.as_str(), row.plate.as_str(), row.phone.as_deref()))
             .collect();
+        // B2AAA was recorded last, so it comes first even though its date is older.
         assert_eq!(
             rows,
             [
-                ("2030-06-10", "B1AAA", Some("0722000000")),
                 ("2030-06-05", "B2AAA", None),
+                ("2030-06-10", "B1AAA", Some("0722000000")),
                 ("2030-06-01", "B1AAA", Some("0722000000")),
             ]
         );
+        assert_eq!(found.inspected[0].revision_frequency, 12);
     }
 
     #[test]
@@ -712,6 +746,9 @@ mod tests {
             first_visit: text("first"),
             last_visit: text("last visit"),
             plates: text("plates"),
+            row_number: text("no."),
+            frequency: text("frequency"),
+            months: [("12".to_string(), text("1 year"))].into(),
         }
     }
 

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { AutocompleteInput } from "@/components/autocomplete-input";
 import { EntityPicker, isNewOption } from "@/components/data/entity-picker";
 import { Field, FormError, FormWarning } from "@/components/data/field";
@@ -10,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -21,8 +22,8 @@ import {
 } from "@/components/ui/select";
 import { api, errorMessage, type Car, type Frequency, type PickerOption } from "@/lib/api";
 import { suggestManufacturers, suggestModels } from "@/lib/car-models";
-import { isRomanianPlate } from "@/lib/romanian";
-import { displayDate, parseDate, todayIso } from "@/lib/format";
+import { compactPlate, formatPhone, isRomanianPlate } from "@/lib/romanian";
+import { displayDate, fill, parseDate, todayIso } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 
 export const FREQUENCIES: Frequency[] = [6, 12, 24, 36];
@@ -43,14 +44,64 @@ function hasNoDate(text: string): boolean {
  */
 let rememberedRevision: string | null = null;
 
+/** Existing cars whose plate starts with what is typed, for filling in the new car form. */
+function useMatchingCars(plate: string, enabled: boolean): Car[] {
+  const [cars, setCars] = useState<Car[]>([]);
+  const prefix = compactPlate(plate);
+  useEffect(() => {
+    if (!enabled || prefix.length < 2) {
+      setCars([]);
+      return;
+    }
+    let stale = false;
+    api
+      .listCars({
+        search: "",
+        frequency: null,
+        revisionState: null,
+        revisionFrom: null,
+        revisionTo: null,
+        sort: "plate",
+        platePrefix: prefix,
+        page: 0,
+      })
+      .then((page) => {
+        if (!stale) setCars(page.rows.slice(0, 8));
+      })
+      .catch(() => {
+        if (!stale) setCars([]);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [prefix, enabled]);
+  return cars;
+}
+
+/**
+ * The car's most recent number: whoever brought it to its last inspection, otherwise the
+ * newest client linked to it.
+ */
+export function latestClient(car: Car): PickerOption | null {
+  const brought = car.clients.find((client) => client.id === car.inspectedBy);
+  if (brought) return brought;
+  return car.clients.reduce<PickerOption | null>(
+    (newest, client) => (newest === null || client.id > newest.id ? client : newest),
+    null,
+  );
+}
+
 export function CarDialog({
   car,
   onClose,
   onSaved,
+  onOpenExisting,
 }: {
   car: Car | null;
   onClose: () => void;
   onSaved: (car: PickerOption) => void;
+  /** A car picked from the plate suggestions of the new car form, to edit instead. */
+  onOpenExisting?: (car: Car) => void;
 }) {
   const { t } = useI18n();
   const [plate, setPlate] = useState(car?.plate ?? "");
@@ -61,8 +112,16 @@ export function CarDialog({
     return displayDate(rememberedRevision ?? todayIso());
   });
   const [frequency, setFrequency] = useState<Frequency | null>(car?.revisionFrequency ?? null);
-  const [clients, setClients] = useState(car?.clients ?? []);
+  // Only the most recent number is shown; the car's other numbers stay linked when saving and
+  // are listed in its details window.
+  const latest = car ? latestClient(car) : null;
+  const [clients, setClients] = useState<PickerOption[]>(latest ? [latest] : []);
+  const kept = (car?.clients ?? []).filter((client) => client.id !== latest?.id);
   const [notes, setNotes] = useState(car?.notes ?? "");
+  const [feedback, setFeedback] = useState(car?.feedback ?? false);
+  // The plate warning waits until the field is left, so it does not flash while typing.
+  const [typingPlate, setTypingPlate] = useState(false);
+  const matching = useMatchingCars(plate, !car && Boolean(onOpenExisting));
   // A car already inspected by someone unrecorded keeps "unknown" until a new date is entered.
   const [inspectedBy, setInspectedBy] = useState(
     car?.inspectedBy != null ? String(car.inspectedBy) : car?.lastRevision ? UNKNOWN : "",
@@ -111,7 +170,11 @@ export function CarDialog({
         lastRevision: revision,
         revisionFrequency: frequency,
         notes,
-        clientIds: clients.filter((client) => !isNewOption(client)).map((client) => client.id),
+        feedback,
+        clientIds: [
+          ...clients.filter((client) => !isNewOption(client)).map((client) => client.id),
+          ...kept.filter((client) => !clients.some((chosen) => chosen.id === client.id)).map((client) => client.id),
+        ],
         newPhones: clients.filter(isNewOption).map((client) => client.label),
         inspectedBy: revision && bringer && !isNewOption(bringer) ? bringer.id : null,
         inspectedByPhone: revision && bringer && isNewOption(bringer) ? bringer.label : null,
@@ -131,8 +194,41 @@ export function CarDialog({
         </DialogHeader>
         <form onSubmit={submit} className="flex flex-col gap-4">
           <Field label={t.data.plate}>
-            <Input value={plate} onChange={(event) => setPlate(event.target.value)} required autoFocus />
-            <FormWarning message={plate.trim() !== "" && !isRomanianPlate(plate) && t.data.plateWarning} />
+            {car || !onOpenExisting ? (
+              <Input
+                value={plate}
+                onChange={(event) => setPlate(event.target.value)}
+                onFocus={() => setTypingPlate(true)}
+                onBlur={() => setTypingPlate(false)}
+                required
+                autoFocus
+              />
+            ) : (
+              <AutocompleteInput
+                value={plate}
+                onChange={setPlate}
+                required
+                autoFocus
+                pickOnTab={false}
+                onFocus={() => setTypingPlate(true)}
+                onBlurCapture={() => setTypingPlate(false)}
+                suggestions={matching.map((match) => ({
+                  key: String(match.carId),
+                  label: match.plate,
+                  hint: [match.manufacturer, match.model === "-" ? "" : match.model].join(" ").trim(),
+                }))}
+                onPick={(suggestion) => {
+                  const match = matching.find((item) => String(item.carId) === suggestion.key);
+                  if (match) onOpenExisting(match);
+                }}
+              />
+            )}
+            {!car && matching.length > 0 && (
+              <span className="text-xs font-normal text-muted-foreground">{t.data.plateSuggestHint}</span>
+            )}
+            <FormWarning
+              message={!typingPlate && plate.trim() !== "" && !isRomanianPlate(plate) && t.data.plateWarning}
+            />
           </Field>
           <div className="grid grid-cols-2 gap-4">
             <Field label={t.data.model}>
@@ -169,8 +265,14 @@ export function CarDialog({
             onChange={setClients}
             multiple
             allowNewPhone
+            compact
             linkedTo={car?.carId ?? null}
           />
+          {kept.length > 0 && (
+            <p className="-mt-2 text-xs text-muted-foreground">
+              {fill(t.data.otherNumbersKept, { count: kept.length })}
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <Field label={t.data.lastRevision}>
               <Input
@@ -208,7 +310,7 @@ export function CarDialog({
                 <SelectContent>
                   {clients.map((client) => (
                     <SelectItem key={client.id} value={String(client.id)}>
-                      {client.label}
+                      {formatPhone(client.label)}
                     </SelectItem>
                   ))}
                   <SelectItem value={UNKNOWN}>{t.data.unknownClient}</SelectItem>
@@ -225,6 +327,17 @@ export function CarDialog({
               onChange={(event) => setNotes(event.target.value)}
             />
           </Field>
+          <label className="flex items-start gap-2 text-sm">
+            <Checkbox
+              className="mt-0.5"
+              checked={feedback}
+              onCheckedChange={(checked) => setFeedback(checked === true)}
+            />
+            <span className="flex flex-col gap-0.5">
+              <span className="font-medium">{t.data.feedback}</span>
+              <span className="text-xs text-muted-foreground">{t.data.feedbackHint}</span>
+            </span>
+          </label>
           <FormError message={error} />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>

@@ -55,6 +55,11 @@ pub fn preview_delete_client(db: Db<'_>, id: i64) -> Result<DeletePreview, AppEr
 }
 
 #[tauri::command]
+pub fn car_history(db: Db<'_>, id: i64) -> Result<data::CarHistory, AppError> {
+    db.with(|conn| data::car_history(conn, id))
+}
+
+#[tauri::command]
 pub fn preview_delete_car(db: Db<'_>, id: i64) -> Result<DeletePreview, AppError> {
     db.with(|conn| data::preview_delete_car(conn, id))
 }
@@ -234,13 +239,8 @@ pub fn sms_progress(app: AppHandle) -> Result<SendProgress, AppError> {
 }
 
 #[tauri::command]
-pub fn sms_history(
-    db: Db<'_>,
-    page: i64,
-    channel: String,
-    status: Option<String>,
-) -> Result<Page<SentMessage>, AppError> {
-    db.with(|conn| sms::history(conn, page, &channel, status.as_deref()))
+pub fn sms_history(db: Db<'_>, page: i64, filter: sms::HistoryFilter) -> Result<Page<SentMessage>, AppError> {
+    db.with(|conn| sms::history(conn, page, &filter))
 }
 
 #[tauri::command]

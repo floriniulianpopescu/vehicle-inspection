@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ImageIcon, SendIcon, SquareIcon } from "lucide-react";
 import { DaysInput } from "@/components/days-input";
+import { matchesSearch, useMessageFilters, withinDays } from "@/components/sms/message-filters";
 import { FormError } from "@/components/data/field";
 import { ShowMore, useShowMore } from "@/components/show-more";
 import { EmptyRow } from "@/components/data/table-parts";
@@ -18,6 +19,8 @@ import {
 } from "@/components/ui/table";
 import { api, errorMessage, type PendingMessage, type SendProgress } from "@/lib/api";
 import { displayDate, displayDateTime, fill, todayIso } from "@/lib/format";
+import { formatPhone } from "@/lib/romanian";
+import { useFocusRefresh } from "@/hooks/use-focus-refresh";
 import { useI18n } from "@/lib/i18n";
 import { Input } from "@/components/ui/input";
 import {
@@ -67,6 +70,15 @@ export function usePendingMessages() {
   const [progress, setProgress] = useState<SendProgress | null>(null);
   const [configured, setConfigured] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // How many days ahead reminders look, shared by the WhatsApp and SMS reminder tabs.
+  const [days, setDays] = useState<number | null>(null);
+
+  useEffect(() => {
+    api
+      .smsReminderDays()
+      .then(setDays)
+      .catch(() => {});
+  }, []);
 
   const reload = useCallback(() => {
     api
@@ -77,6 +89,12 @@ export function usePendingMessages() {
       })
       .catch((failure) => setError(errorMessage(t, failure)));
   }, [t]);
+
+  // Coming back to the window picks up cars and clients changed meanwhile.
+  const refreshed = useFocusRefresh();
+  useEffect(() => {
+    if (refreshed > 0) reload();
+  }, [refreshed, reload]);
 
   useEffect(() => {
     reload();
@@ -97,7 +115,7 @@ export function usePendingMessages() {
     return () => void stop.then((unlisten) => unlisten());
   }, [reload]);
 
-  return { all, reload, progress, configured, error };
+  return { all, reload, progress, configured, error, days, setDays };
 }
 
 export type PendingMessages = ReturnType<typeof usePendingMessages>;
@@ -113,42 +131,55 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
   const isSms = group === "remindersSms";
   const isReminder = group === "remindersSms" || group === "remindersWhatsapp";
   const channel = isSms ? "sms" : "whatsapp";
-  const { all, reload, progress, configured } = shared;
-  const items = all.filter((item) => groupOf(item) === group);
+  const { all, reload, progress, configured, days, setDays } = shared;
+  const filters = useMessageFilters(
+    group === "greetings" ? t.data.date : group === "feedback" ? t.sms.inspectedOn : t.data.nextRevision,
+  );
+  const items = all.filter(
+    (item) =>
+      groupOf(item) === group &&
+      matchesSearch(item, filters.search) &&
+      withinDays(item.dueDate, filters.from, filters.to),
+  );
   // Ticks the person changed; everything else follows its status.
   const [overrides, setOverrides] = useState<Map<string, boolean>>(new Map());
   const [filter, setFilter] = useState<Filter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   // Stop finishes or drops the message in progress, which can take a few seconds.
   const [stopping, setStopping] = useState(false);
-  const [days, setDays] = useState<number | null>(null);
   const [intervalText, setIntervalText] = useState(String(MIN_INTERVAL_SECONDS));
   const [ownError, setError] = useState<string | null>(null);
   const error = ownError ?? shared.error;
 
   useEffect(() => {
-    if (isReminder) {
-      api
-        .smsReminderDays()
-        .then(setDays)
-        .catch(() => {});
-    }
     api
       .smsIntervalSeconds(channel)
       .then((seconds) => setIntervalText(String(seconds)))
       .catch(() => {});
-  }, [isReminder, channel]);
+  }, [channel]);
 
   useEffect(() => {
     if (!progress?.active) setStopping(false);
   }, [progress?.active]);
 
-  // After a send the statuses change, so the default ticks apply again.
-  useEffect(() => setOverrides(new Map()), [all]);
+  // After a send the statuses change, so the default ticks apply again. A reload that changes
+  // nothing keeps the ticks as they are.
+  const statuses = all
+    .filter((item) => groupOf(item) === group)
+    .map((item) => `${item.key}=${item.status}`)
+    .join();
+  useEffect(() => setOverrides(new Map()), [statuses]);
 
   const sending = progress?.active ?? false;
   const today = todayIso();
-  const isChecked = (item: PendingMessage) => overrides.get(item.key) ?? item.status !== "sent";
+  // Ticked by default: what has not gone through yet. A reminder already delivered by the other
+  // channel is left unticked, and SMS is ticked only where WhatsApp failed, so the same client
+  // does not get it twice by accident.
+  const tickedByDefault = (item: PendingMessage) =>
+    item.status !== "sent" &&
+    item.otherStatus !== "sent" &&
+    (group !== "remindersSms" || item.otherStatus === "failed");
+  const isChecked = (item: PendingMessage) => overrides.get(item.key) ?? tickedByDefault(item);
   const dueMatching = isReminder ? items.filter((item) => matches(item, filter, today)) : items;
   const counts: Record<Filter, number> = {
     all: items.length,
@@ -167,7 +198,10 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
   const selected = visible.filter(isChecked);
   const allSelected = visible.length > 0 && selected.length === visible.length;
   // Only the drawing is limited; selecting and sending use the whole list.
-  const { shown, hidden, more } = useShowMore(visible, `${filter}|${statusFilter}|${all.length}`);
+  const { shown, hidden, more } = useShowMore(
+    visible,
+    `${filter}|${statusFilter}|${filters.key}|${all.length}`,
+  );
 
   function toggle(key: string, checked: boolean) {
     setOverrides((previous) => new Map(previous).set(key, checked));
@@ -320,6 +354,8 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
       )}
       {progress?.error && <FormError message={errorMessage(t, progress.error)} />}
 
+      {filters.bar}
+
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         {isReminder && (
           <div role="radiogroup" aria-label={text.filterLabel} className="flex flex-wrap gap-1">
@@ -380,7 +416,7 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
             <TableRow key={item.key}>
               <TableCell>
                 <Checkbox
-                  aria-label={`${text.select} ${item.phone}`}
+                  aria-label={`${text.select} ${formatPhone(item.phone)}`}
                   checked={isChecked(item)}
                   disabled={sending}
                   onCheckedChange={(checked) => toggle(item.key, checked === true)}
@@ -394,6 +430,14 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
                   {item.lastAttempt && (
                     <span className="text-xs text-muted-foreground">{displayDateTime(item.lastAttempt)}</span>
                   )}
+                  {item.otherStatus && item.otherStatus !== "unsent" && (
+                    <span
+                      className={`text-xs ${item.otherStatus === "sent" ? "text-emerald-700 dark:text-emerald-300" : "text-red-700 dark:text-red-300"}`}
+                      title={item.otherAttempt ? displayDateTime(item.otherAttempt) : undefined}
+                    >
+                      {text.channels[item.channel === "sms" ? "whatsapp" : "sms"]}: {text.statuses[item.otherStatus]}
+                    </span>
+                  )}
                 </span>
               </TableCell>
               {group === "greetings" && (
@@ -406,7 +450,7 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
                   </span>
                 </TableCell>
               )}
-              <TableCell>{item.phone}</TableCell>
+              <TableCell className="whitespace-nowrap">{formatPhone(item.phone)}</TableCell>
               {group !== "greetings" && (
                 <TableCell className="font-medium">{item.plate ?? "-"}</TableCell>
               )}

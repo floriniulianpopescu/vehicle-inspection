@@ -186,13 +186,18 @@ const templates = Object.fromEntries(
 
 const insertClient = db.prepare("INSERT INTO clients (Phone, SmsOptOut) VALUES (?, ?) RETURNING ClientID");
 const insertCar = db.prepare(
-  "INSERT INTO cars (Plate, Manufacturer, Model, LastRevision, RevisionFrequency, Notes) VALUES (?, ?, ?, ?, ?, ?) RETURNING CarID",
+  "INSERT INTO cars (Plate, Manufacturer, Model, LastRevision, RevisionFrequency, Notes, Feedback, CreatedAt, UpdatedAt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8) RETURNING CarID",
 );
 const link = db.prepare("INSERT OR IGNORE INTO carsclients (CarID, ClientID) VALUES (?, ?)");
 const insertInspection = db.prepare("INSERT OR IGNORE INTO inspections (CarID, ClientID, Date) VALUES (?, ?, ?)");
 const insertMessage = db.prepare(
-  "INSERT INTO messages (ClientID, CarID, Type, Text, SentAt, Status) VALUES (?, ?, ?, ?, ?, ?)",
+  "INSERT INTO messages (ClientID, CarID, Type, Text, SentAt, Status, Channel) VALUES (?, ?, ?, ?, ?, ?, ?)",
 );
+// ITP reminders went by SMS in the demo history; greetings and feedback by WhatsApp.
+const recordMessage = {
+  run: (client: number, car: number | null, kind: string, text: string, sentAt: string, status: string) =>
+    insertMessage.run(client, car, kind, text, sentAt, status, kind === "inspection" ? "sms" : "whatsapp"),
+};
 
 type ClientRow = { id: number; since: Date };
 const clients: ClientRow[] = [];
@@ -246,8 +251,19 @@ db.transaction(() => {
     const note = frequency === 6 ? weighted([["Taxi", 6], ["Transport persoane", 3], [null, 1]] as const) : weighted(NOTES);
     const last = visits.length ? iso(visits[visits.length - 1]) : null;
     const carPlate = plate();
+    // Part of the clients agreed to be asked for feedback.
+    const wantsFeedback = chance(0.6);
     const carId = (
-      insertCar.get(carPlate, make, pick(models), last, frequency, note ?? "") as { CarID: number }
+      insertCar.get(
+        carPlate,
+        make,
+        pick(models),
+        last,
+        frequency,
+        note ?? "",
+        wantsFeedback ? 1 : 0,
+        `${iso(visits[0] ?? first)}T${String(between(8, 17)).padStart(2, "0")}:${String(between(0, 59)).padStart(2, "0")}:00`,
+      ) as { CarID: number }
     ).CarID;
     counts.cars += 1;
     link.run(carId, owner.id);
@@ -259,8 +275,8 @@ db.transaction(() => {
       counts.inspections += 1;
 
       // Feedback asked the same day, for part of the visits in the last six months.
-      if (bringer && visit >= addDays(today, -183) && chance(0.45)) {
-        insertMessage.run(bringer, carId, "feedback", templates.feedback.replace("{plate}", carPlate), at(visit, 12, 19), "sent");
+      if (wantsFeedback && bringer && visit >= addDays(today, -183) && chance(0.7)) {
+        recordMessage.run(bringer, carId, "feedback", templates.feedback.replace("{plate}", carPlate), at(visit, 12, 19), "sent");
         counts.messages += 1;
       }
     }
@@ -272,7 +288,7 @@ db.transaction(() => {
       const sentOn = addDays(due, -between(10, 25));
       if (sentOn < start) continue;
       const text = templates.inspection.replace("{plate}", carPlate).replace("{date}", display(due));
-      insertMessage.run(owner.id, carId, "inspection", text, at(sentOn), chance(0.96) ? "sent" : "failed");
+      recordMessage.run(owner.id, carId, "inspection", text, at(sentOn), chance(0.96) ? "sent" : "failed");
       counts.messages += 1;
     }
   }
@@ -288,7 +304,7 @@ db.transaction(() => {
       if (date < start || date > today) continue;
       for (const client of clients) {
         if (client.since > date || !chance(0.65)) continue;
-        insertMessage.run(client.id, null, kind, templates[kind], at(addDays(date, -between(0, 3))), chance(0.97) ? "sent" : "failed");
+        recordMessage.run(client.id, null, kind, templates[kind], at(addDays(date, -between(0, 3))), chance(0.97) ? "sent" : "failed");
         counts.messages += 1;
       }
     }

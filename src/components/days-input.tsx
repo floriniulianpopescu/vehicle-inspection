@@ -3,7 +3,10 @@ import { Input } from "@/components/ui/input";
 import { MAX_EXPIRING_DAYS } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
-/** Whole days from 1 to `MAX_EXPIRING_DAYS`, applied when the field loses focus or on Enter. */
+/** Pause after the last key before a typed value is applied. */
+const APPLY_AFTER_MS = 400;
+
+/** Whole days from 1 to `MAX_EXPIRING_DAYS`. */
 export function clampDays(text: string): number | null {
   const value = Number.parseInt(text, 10);
   if (Number.isNaN(value)) return null;
@@ -23,6 +26,16 @@ export function DaysInput({
   const [text, setText] = useState(String(value));
 
   useEffect(() => setText(String(value)), [value]);
+
+  // Applied by itself shortly after typing stops, so the list updates without leaving the field.
+  useEffect(() => {
+    const days = clampDays(text);
+    if (days === null || days === value) return;
+    const timer = window.setTimeout(() => onCommit(days), APPLY_AFTER_MS);
+    return () => window.clearTimeout(timer);
+    // onCommit is rebuilt on every render of the parent; the text is what matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text, value]);
 
   function commit() {
     const days = clampDays(text);

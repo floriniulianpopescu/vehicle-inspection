@@ -24,11 +24,17 @@ export type Car = {
   revisionState: RevisionState;
   /** The client who brought the car to its last inspection, when known. */
   inspectedBy: number | null;
+  /** When the car was added, e.g. "2026-11-17T10:30:00". */
+  createdAt: string | null;
+  /** When the car was last added or edited. */
+  updatedAt: string | null;
+  /** The client agreed to be asked for feedback after the inspection. */
+  feedback: boolean;
   clients: PickerOption[];
 };
 
 export type ClientFilter = { search: string; page: number };
-export type CarSort = "plate" | "newest" | "oldest";
+export type CarSort = "edited" | "plate" | "newest" | "oldest";
 export type CarFilter = {
   search: string;
   frequency: number | null;
@@ -36,6 +42,8 @@ export type CarFilter = {
   revisionFrom: string | null;
   revisionTo: string | null;
   sort: CarSort;
+  /** Only plates starting with this (spaces and dashes ignored). */
+  platePrefix?: string | null;
   page: number;
 };
 export type ClientInput = {
@@ -52,12 +60,32 @@ export type CarInput = {
   lastRevision: string | null;
   revisionFrequency: number;
   notes: string;
+  feedback: boolean;
   clientIds: number[];
   inspectedBy: number | null;
   /** Typed numbers that become new clients linked to the car. */
   newPhones: string[];
   /** Set instead of inspectedBy when one of newPhones brought the car. */
   inspectedByPhone: string | null;
+};
+export type HistoryFilter = {
+  channel: "sms" | "whatsapp";
+  status: "sent" | "failed" | null;
+  /** Phone, plate or text. */
+  search: string;
+  /** Sent between these days, both included; null means no limit. */
+  from: string | null;
+  to: string | null;
+};
+export type CarHistory = {
+  inspections: { date: string; phone: string | null }[];
+  messages: {
+    sentAt: string;
+    kind: SmsKind;
+    channel: "sms" | "whatsapp";
+    status: "sent" | "failed";
+    phone: string;
+  }[];
 };
 export type DeletePreview = {
   cars: string[];
@@ -93,6 +121,7 @@ export type InspectedRow = {
   model: string;
   phone: string | null;
   nextRevision: string | null;
+  revisionFrequency: Frequency;
 };
 export type DueRow = {
   carId: number;
@@ -130,6 +159,9 @@ export type Report = {
   repeatClients: RepeatClient[];
 };
 export type ReportExportLabels = {
+  rowNumber: string;
+  frequency: string;
+  months: Record<string, string>;
   sheetInspected: string;
   sheetExpiring: string;
   sheetExpired: string;
@@ -200,6 +232,9 @@ export type PendingMessage = {
   /** The last attempt in this round; sent ones can be sent again. */
   status: "unsent" | "sent" | "failed";
   lastAttempt: string | null;
+  /** ITP reminders: how the same reminder went through the other channel. */
+  otherStatus: "unsent" | "sent" | "failed" | null;
+  otherAttempt: string | null;
 };
 export type SentMessage = {
   messageId: number;
@@ -235,6 +270,7 @@ export const api = {
   saveCar: (input: CarInput) => invoke<PickerOption>("save_car", { input }),
   previewDeleteClient: (id: number) => invoke<DeletePreview>("preview_delete_client", { id }),
   previewDeleteCar: (id: number) => invoke<DeletePreview>("preview_delete_car", { id }),
+  carHistory: (id: number) => invoke<CarHistory>("car_history", { id }),
   deleteClient: (id: number) => invoke<void>("delete_client", { id }),
   deleteCar: (id: number) => invoke<void>("delete_car", { id }),
   smsReminderDays: () => invoke<number>("sms_reminder_days"),
@@ -246,8 +282,8 @@ export const api = {
     invoke<number>("sms_interval_seconds", { channel }),
   smsStop: () => invoke<void>("sms_stop"),
   smsProgress: () => invoke<SendProgress>("sms_progress"),
-  smsHistory: (page: number, channel: "sms" | "whatsapp", status: "sent" | "failed" | null) =>
-    invoke<Page<SentMessage>>("sms_history", { page, channel, status }),
+  smsHistory: (page: number, filter: HistoryFilter) =>
+    invoke<Page<SentMessage>>("sms_history", { page, filter }),
   smsTemplates: () => invoke<SmsTemplate[]>("sms_templates"),
   smsSaveTemplate: (template: SmsTemplate) =>
     invoke<void>("sms_save_template", { template: { kind: template.kind, text: template.text } }),
