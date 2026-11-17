@@ -1,19 +1,56 @@
-import { HeartIcon, MessageCircleIcon, MessageSquareIcon, PenLineIcon, ThumbsUpIcon } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { HeartIcon, HistoryIcon, MessageSquareIcon, PenLineIcon, ThumbsUpIcon, TypeIcon } from "lucide-react";
 import { CustomTab } from "@/components/sms/custom-tab";
 import { HistoryTab } from "@/components/sms/history-tab";
 import { PendingTab, usePendingMessages } from "@/components/sms/pending-tab";
 import { TemplatesTab } from "@/components/sms/templates-tab";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/lib/i18n";
 
 // The message lists stay loaded while hidden, so switching between them is instant.
 const KEEP = "data-[state=inactive]:hidden";
 
+type Channel = "whatsapp" | "sms";
+
+/** WhatsApp or SMS, for the tabs that hold both. */
+function ChannelSwitch({
+  value,
+  onChange,
+  badges = {},
+}: {
+  value: Channel;
+  onChange: (channel: Channel) => void;
+  badges?: Partial<Record<Channel, ReactNode>>;
+}) {
+  const { t } = useI18n();
+  return (
+    <div role="radiogroup" aria-label={t.sms.channel} className="flex gap-1">
+      {(["whatsapp", "sms"] as const).map((channel) => (
+        <Button
+          key={channel}
+          role="radio"
+          aria-checked={value === channel}
+          variant={value === channel ? "default" : "outline"}
+          size="sm"
+          onClick={() => onChange(channel)}
+        >
+          {t.sms.channels[channel]}
+          {badges[channel]}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
 export function AutoSmsPage() {
   const { t } = useI18n();
-  // Loaded once for the three message tabs.
+  const text = t.sms;
+  // Loaded once for all the message tabs.
   const shared = usePendingMessages();
+  const [reminderChannel, setReminderChannel] = useState<Channel>("whatsapp");
+  const [historyChannel, setHistoryChannel] = useState<Channel>("whatsapp");
   // Reminders WhatsApp could not deliver, still to go by SMS.
   const smsToSend = shared.all.filter(
     (item) =>
@@ -25,42 +62,52 @@ export function AutoSmsPage() {
   const failedReminders = shared.all.filter(
     (item) => item.kind === "inspection" && item.channel === "whatsapp" && item.status === "failed",
   ).length;
+  const count = (value: number, variant: "secondary" | "destructive") =>
+    value > 0 ? <Badge variant={variant}>{value}</Badge> : null;
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-4 p-6">
-      <Tabs defaultValue="remindersWhatsapp">
-        <TabsList className="h-auto flex-wrap">
-          <TabsTrigger value="remindersWhatsapp">
-            <MessageCircleIcon />
-            {t.sms.tabs.remindersWhatsapp}
-            {failedReminders > 0 && <Badge variant="destructive">{failedReminders}</Badge>}
-          </TabsTrigger>
-          <TabsTrigger value="remindersSms">
+      <Tabs defaultValue="reminders">
+        <TabsList className="h-auto max-w-full flex-wrap">
+          <TabsTrigger value="reminders">
             <MessageSquareIcon />
-            {t.sms.tabs.remindersSms}
-            {smsToSend > 0 && <Badge variant="secondary">{smsToSend}</Badge>}
+            {text.tabs.reminders}
+            {count(failedReminders + smsToSend, "destructive")}
           </TabsTrigger>
-          <TabsTrigger value="custom">
+          <TabsTrigger value="custom" title={text.whatsappOnlyTab}>
             <PenLineIcon />
-            {t.sms.tabs.custom}
+            {text.tabs.custom}
           </TabsTrigger>
-          <TabsTrigger value="feedback">
+          <TabsTrigger value="feedback" title={text.whatsappOnlyTab}>
             <ThumbsUpIcon />
-            {t.sms.tabs.feedback}
+            {text.tabs.feedback}
           </TabsTrigger>
-          <TabsTrigger value="thanks">
+          <TabsTrigger value="thanks" title={text.whatsappOnlyTab}>
             <HeartIcon />
-            {t.sms.tabs.thanks}
+            {text.tabs.thanks}
           </TabsTrigger>
-          <TabsTrigger value="historyWhatsapp">{t.sms.tabs.historyWhatsapp}</TabsTrigger>
-          <TabsTrigger value="historySms">{t.sms.tabs.historySms}</TabsTrigger>
-          <TabsTrigger value="templates">{t.sms.tabs.templates}</TabsTrigger>
+          <TabsTrigger value="history">
+            <HistoryIcon />
+            {text.tabs.history}
+          </TabsTrigger>
+          <TabsTrigger value="templates">
+            <TypeIcon />
+            {text.tabs.templates}
+          </TabsTrigger>
         </TabsList>
-        <TabsContent value="remindersWhatsapp" forceMount className={KEEP}>
-          <PendingTab group="remindersWhatsapp" shared={shared} />
-        </TabsContent>
-        <TabsContent value="remindersSms" forceMount className={KEEP}>
-          <PendingTab group="remindersSms" shared={shared} />
+
+        <TabsContent value="reminders" forceMount className={`${KEEP} flex flex-col gap-3`}>
+          <ChannelSwitch
+            value={reminderChannel}
+            onChange={setReminderChannel}
+            badges={{ whatsapp: count(failedReminders, "destructive"), sms: count(smsToSend, "secondary") }}
+          />
+          <div className={reminderChannel === "whatsapp" ? "" : "hidden"}>
+            <PendingTab group="remindersWhatsapp" shared={shared} />
+          </div>
+          <div className={reminderChannel === "sms" ? "" : "hidden"}>
+            <PendingTab group="remindersSms" shared={shared} />
+          </div>
         </TabsContent>
         <TabsContent value="custom" forceMount className={KEEP}>
           <CustomTab shared={shared} />
@@ -71,11 +118,9 @@ export function AutoSmsPage() {
         <TabsContent value="thanks" forceMount className={KEEP}>
           <PendingTab group="thanks" shared={shared} />
         </TabsContent>
-        <TabsContent value="historyWhatsapp">
-          <HistoryTab channel="whatsapp" />
-        </TabsContent>
-        <TabsContent value="historySms">
-          <HistoryTab channel="sms" />
+        <TabsContent value="history" className="flex flex-col gap-3">
+          <ChannelSwitch value={historyChannel} onChange={setHistoryChannel} />
+          <HistoryTab key={historyChannel} channel={historyChannel} />
         </TabsContent>
         <TabsContent value="templates">
           <TemplatesTab />

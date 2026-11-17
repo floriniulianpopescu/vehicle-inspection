@@ -296,14 +296,13 @@ export const ro = {
     },
   },
   sms: {
+    whatsappOnlyTab: "Se trimit doar pe WhatsApp.",
     tabs: {
-      remindersWhatsapp: "Reamintiri ITP · WhatsApp",
-      remindersSms: "Reamintiri ITP · SMS",
-      custom: "Personalizate · WhatsApp",
-      feedback: "Feedback · WhatsApp",
-      thanks: "Mulțumiri · WhatsApp",
-      historyWhatsapp: "Istoric · WhatsApp",
-      historySms: "Istoric · SMS",
+      reminders: "Reamintiri ITP",
+      custom: "Personalizate",
+      feedback: "Feedback",
+      thanks: "Mulțumiri",
+      history: "Istoric",
       templates: "Texte",
     },
     kinds: {

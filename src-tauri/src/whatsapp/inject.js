@@ -61,11 +61,57 @@
     return null;
   }
 
+  /**
+   * Presses like a mouse does: pointer and mouse down and up over the middle of the element,
+   * then the click. Newer WhatsApp pages react to the pointer events, not to a bare click().
+   */
+  function press(element) {
+    const rect = element.getBoundingClientRect();
+    const at = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      button: 0,
+      clientX: rect.left + rect.width / 2,
+      clientY: rect.top + rect.height / 2,
+    };
+    const pointer = { ...at, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    element.dispatchEvent(new PointerEvent("pointerover", pointer));
+    element.dispatchEvent(new PointerEvent("pointerenter", { ...pointer, bubbles: false }));
+    element.dispatchEvent(new MouseEvent("mouseover", at));
+    element.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1 }));
+    element.dispatchEvent(new MouseEvent("mousedown", { ...at, buttons: 1 }));
+    element.dispatchEvent(new PointerEvent("pointerup", pointer));
+    element.dispatchEvent(new MouseEvent("mouseup", at));
+    element.dispatchEvent(new MouseEvent("click", at));
+  }
+
+  /** A short description of an element for the log, e.g. button[aria-label=Send][icon=send]. */
+  function describe(element) {
+    if (!element) return "none";
+    const icon = element.querySelector?.("[data-icon]")?.getAttribute("data-icon") || element.getAttribute("data-icon");
+    const parts = [element.tagName.toLowerCase()];
+    for (const name of ["role", "aria-label", "aria-disabled", "disabled"]) {
+      if (element.hasAttribute(name)) parts.push(`[${name}=${element.getAttribute(name)}]`);
+    }
+    if (icon) parts.push(`[icon=${icon}]`);
+    return parts.join("");
+  }
+
   function pressEnter(box) {
     box.focus();
     for (const type of ["keydown", "keypress", "keyup"]) {
       box.dispatchEvent(
-        new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }),
+        new KeyboardEvent(type, {
+          key: "Enter",
+          code: "Enter",
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        }),
       );
     }
   }
@@ -216,9 +262,14 @@
       await wait(500);
     }
 
-    trace("pressing send on the picture");
-    opened.control.click();
-    await wait(1500);
+    trace(`pressing send on the picture: ${describe(opened.control)}`);
+    press(opened.control);
+    await wait(2000);
+    if (opened.caption.isConnected && document.body.contains(opened.control)) {
+      trace("preview still open, pressing enter in the caption");
+      pressEnter(opened.caption);
+      await wait(2000);
+    }
     // The preview closes once WhatsApp takes the picture; if it is still open, nothing went.
     if (opened.caption.isConnected && document.body.contains(opened.control)) return finish("not_sent");
     // WhatsApp may leave the original text in the message box as a draft; clear it so it is
@@ -268,19 +319,31 @@
     const panel = chatPanel(box);
     if (picture) return sendWithImage(box, expected, text, picture, stopped, trace, finish);
 
-    const button = sendButtonNear(box);
-    trace(button ? "pressing send" : "no send button, pressing enter");
-    if (button) button.click();
-    else pressEnter(box);
-
-    // Give WhatsApp time to empty the box, so the fallback below never sends twice.
-    await wait(1500);
-    if (composerWith(expected)) {
-      trace("text still there, pressing enter");
-      pressEnter(composerWith(expected));
-      await wait(1500);
+    // A few tries, finding the button again each time: the chat can still be settling, and
+    // WhatsApp sometimes ignores the first press. Each try waits for the box to empty, so a
+    // message that went is never sent twice.
+    const ATTEMPTS = 4;
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
+      const current = composerWith(expected);
+      if (!current) break;
+      if (stopped()) return finish("cancelled");
+      const button = sendButtonNear(current);
+      const useEnter = !button || attempt % 2 === 0;
+      trace(
+        `attempt ${attempt}: ${useEnter ? "pressing enter" : "pressing send"}; send button ${describe(button)}; ` +
+          `${sendControls().length} send control(s) on the page`,
+      );
+      if (useEnter) pressEnter(current);
+      else {
+        current.focus();
+        press(button);
+      }
+      await wait(attempt === 1 ? 1500 : 2500);
     }
-    if (composerWith(expected)) return finish("not_sent");
+    if (composerWith(expected)) {
+      trace(`gave up; message box ${describe(composerWith(expected))}`);
+      return finish("not_sent");
+    }
 
     trace("waiting for the tick");
     return confirm(panel, snippet, stopped, finish);

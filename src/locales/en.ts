@@ -296,14 +296,13 @@ export const en: Messages = {
     },
   },
   sms: {
+    whatsappOnlyTab: "Sent by WhatsApp only.",
     tabs: {
-      remindersWhatsapp: "ITP reminders · WhatsApp",
-      remindersSms: "ITP reminders · SMS",
-      custom: "Custom · WhatsApp",
-      feedback: "Feedback · WhatsApp",
-      thanks: "Thanks · WhatsApp",
-      historyWhatsapp: "History · WhatsApp",
-      historySms: "History · SMS",
+      reminders: "ITP reminders",
+      custom: "Custom",
+      feedback: "Feedback",
+      thanks: "Thanks",
+      history: "History",
       templates: "Texts",
     },
     kinds: {
