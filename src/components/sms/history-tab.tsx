@@ -91,7 +91,9 @@ export function HistoryTab({ channel }: { channel: "sms" | "whatsapp" }) {
             <TableRow key={message.messageId}>
               <TableCell>{displayDateTime(message.sentAt)}</TableCell>
               <TableCell>
-                <Badge variant="secondary">{text.kinds[message.kind]}</Badge>
+                <Badge variant="secondary">
+                  {message.kind === "custom" && message.customName ? message.customName : text.kinds[message.kind]}
+                </Badge>
               </TableCell>
               <TableCell className="whitespace-nowrap">{formatPhone(message.phone)}</TableCell>
               <TableCell className="font-medium">{message.plate ?? "-"}</TableCell>

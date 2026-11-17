@@ -85,16 +85,6 @@ function workday(date: Date): Date {
 function at(date: Date, fromHour = 8, toHour = 17): string {
   return `${iso(date)}T${String(between(fromHour, toHour - 1)).padStart(2, "0")}:${String(between(0, 59)).padStart(2, "0")}:${String(between(0, 59)).padStart(2, "0")}`;
 }
-function orthodoxEaster(year: number): Date {
-  const a = year % 4;
-  const b = year % 7;
-  const c = year % 19;
-  const d = (19 * c + 15) % 30;
-  const e = (2 * a + 4 * b - d + 34) % 7;
-  const total = d + e + 114;
-  return addDays(new Date(year, Math.floor(total / 31) - 1, (total % 31) + 1, 12), 13);
-}
-
 const today = new Date();
 today.setHours(12, 0, 0, 0);
 const start = addDays(today, -Math.round(YEARS * 365.25));
@@ -274,9 +264,12 @@ db.transaction(() => {
       insertInspection.run(carId, bringer, iso(visit));
       counts.inspections += 1;
 
-      // Feedback asked the same day, for part of the visits in the last six months.
-      if (wantsFeedback && bringer && visit >= addDays(today, -183) && chance(0.7)) {
-        recordMessage.run(bringer, carId, "feedback", templates.feedback.replace("{plate}", carPlate), at(visit, 12, 19), "sent");
+      // A feedback request (when the client agreed) or a thank-you the same day, for part of
+      // the visits in the last six months; this week's are mostly still to send.
+      const thisWeek = visit >= addDays(today, -6);
+      if (bringer && visit >= addDays(today, -183) && chance(thisWeek ? 0.3 : 0.7)) {
+        const kind = wantsFeedback ? "feedback" : "thanks";
+        recordMessage.run(bringer, carId, kind, templates[kind].replace("{plate}", carPlate), at(visit, 12, 19), "sent");
         counts.messages += 1;
       }
     }
@@ -293,22 +286,17 @@ db.transaction(() => {
     }
   }
 
-  // Holiday greetings to most clients who were already clients by then.
-  for (let year = start.getFullYear(); year <= today.getFullYear() + 1; year += 1) {
-    const holidays = [
-      ["christmas", new Date(year, 11, 25, 12)],
-      ["new_year", new Date(year, 0, 1, 12)],
-      ["easter", orthodoxEaster(year)],
-    ] as const;
-    for (const [kind, date] of holidays) {
-      if (date < start || date > today) continue;
-      for (const client of clients) {
-        if (client.since > date || !chance(0.65)) continue;
-        recordMessage.run(client.id, null, kind, templates[kind], at(addDays(date, -between(0, 3))), chance(0.97) ? "sent" : "failed");
-        counts.messages += 1;
-      }
-    }
-  }
+  // One custom message, for the cars inspected last month, not sent yet.
+  const lastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+  db.prepare(
+    "INSERT INTO custom_messages (Name, Text, FromDate, ToDate, CreatedAt) VALUES (?, ?, ?, ?, ?)",
+  ).run(
+    "Ofertă revizie",
+    "Bună ziua! Pentru {plate} vă oferim 10% reducere la următoarea revizie. Vă așteptăm!",
+    iso(lastMonth),
+    iso(new Date(today.getFullYear(), today.getMonth(), 0)),
+    `${iso(today)}T09:00:00`,
+  );
 })();
 
 db.close();

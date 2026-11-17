@@ -387,7 +387,7 @@ pub fn series(conn: &Connection, filters: &Filters, metric: Metric, grouping: Gr
                     ),
                     filters,
                 )?,
-                &["inspection", "christmas", "new_year", "easter", "feedback"],
+                &["inspection", "feedback", "thanks", "custom", "christmas", "new_year", "easter"],
             ),
             None,
         ),
@@ -574,10 +574,9 @@ mod tests {
         }
         let period = filters("2030-01-01", "2030-01-31");
         let by_kind = |filters: &Filters| {
-            series(&conn, filters, Metric::MessagesByKind, Grouping::Auto).unwrap().points[..2]
-                .iter()
-                .map(|point| point.value)
-                .collect::<Vec<_>>()
+            let points = series(&conn, filters, Metric::MessagesByKind, Grouping::Auto).unwrap().points;
+            ["inspection", "christmas"]
+                .map(|kind| points.iter().find(|point| point.key == kind).map_or(0, |point| point.value))
         };
         assert_eq!(by_kind(&period), [1, 1]);
         assert_eq!(by_kind(&Filters { manufacturer: Some("Dacia".into()), ..period.clone() }), [1, 0]);

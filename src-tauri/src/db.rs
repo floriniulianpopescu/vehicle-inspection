@@ -21,6 +21,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/008_message_channel.sql"),
     include_str!("../migrations/009_car_added_and_feedback.sql"),
     include_str!("../migrations/010_car_updated_at.sql"),
+    include_str!("../migrations/011_custom_messages.sql"),
 ];
 
 pub struct Database {
@@ -490,7 +491,8 @@ mod tests {
             assert_eq!(count(&conn, table), 1, "{table}");
         }
         // Later migrations rebuild the message tables too, keeping the texts and adding feedback.
-        assert_eq!(count(&conn, "sms_templates"), 5);
+        // ITP reminder, feedback and thank-you; the holiday greetings are gone.
+        assert_eq!(count(&conn, "sms_templates"), 3);
         conn.execute(
             "INSERT INTO messages (ClientID, CarID, Type, Text, SentAt, Status)
              VALUES (1, 1, 'feedback', 'x', '2026-01-01T10:00:00', 'sent')",

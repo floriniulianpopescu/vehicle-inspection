@@ -1,4 +1,5 @@
-import { MessageCircleIcon, MessageSquareIcon, PartyPopperIcon, ThumbsUpIcon } from "lucide-react";
+import { HeartIcon, MessageCircleIcon, MessageSquareIcon, PenLineIcon, ThumbsUpIcon } from "lucide-react";
+import { CustomTab } from "@/components/sms/custom-tab";
 import { HistoryTab } from "@/components/sms/history-tab";
 import { PendingTab, usePendingMessages } from "@/components/sms/pending-tab";
 import { TemplatesTab } from "@/components/sms/templates-tab";
@@ -39,13 +40,17 @@ export function AutoSmsPage() {
             {t.sms.tabs.remindersSms}
             {smsToSend > 0 && <Badge variant="secondary">{smsToSend}</Badge>}
           </TabsTrigger>
-          <TabsTrigger value="greetings">
-            <PartyPopperIcon />
-            {t.sms.tabs.greetings}
+          <TabsTrigger value="custom">
+            <PenLineIcon />
+            {t.sms.tabs.custom}
           </TabsTrigger>
           <TabsTrigger value="feedback">
             <ThumbsUpIcon />
             {t.sms.tabs.feedback}
+          </TabsTrigger>
+          <TabsTrigger value="thanks">
+            <HeartIcon />
+            {t.sms.tabs.thanks}
           </TabsTrigger>
           <TabsTrigger value="historyWhatsapp">{t.sms.tabs.historyWhatsapp}</TabsTrigger>
           <TabsTrigger value="historySms">{t.sms.tabs.historySms}</TabsTrigger>
@@ -57,11 +62,14 @@ export function AutoSmsPage() {
         <TabsContent value="remindersSms" forceMount className={KEEP}>
           <PendingTab group="remindersSms" shared={shared} />
         </TabsContent>
-        <TabsContent value="greetings" forceMount className={KEEP}>
-          <PendingTab group="greetings" shared={shared} />
+        <TabsContent value="custom" forceMount className={KEEP}>
+          <CustomTab shared={shared} />
         </TabsContent>
         <TabsContent value="feedback" forceMount className={KEEP}>
           <PendingTab group="feedback" shared={shared} />
+        </TabsContent>
+        <TabsContent value="thanks" forceMount className={KEEP}>
+          <PendingTab group="thanks" shared={shared} />
         </TabsContent>
         <TabsContent value="historyWhatsapp">
           <HistoryTab channel="whatsapp" />

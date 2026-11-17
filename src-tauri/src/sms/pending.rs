@@ -12,16 +12,18 @@ type Result<T> = std::result::Result<T, AppError>;
 pub const DEFAULT_REMINDER_DAYS: i64 = 30;
 /// About six months.
 pub const MAX_REMINDER_DAYS: i64 = 180;
-const GREETING_LEAD_DAYS: i64 = 3;
+/// Feedback requests and thank-yous can be sent for this many days after the inspection,
+/// counting its day.
+pub const AFTER_VISIT_DAYS: i64 = 7;
 pub const KIND_INSPECTION: &str = "inspection";
 pub const KIND_FEEDBACK: &str = "feedback";
-/// ITP reminders go by WhatsApp first and by SMS to whoever WhatsApp fails; greetings and
-/// feedback go by WhatsApp.
+pub const KIND_THANKS: &str = "thanks";
+pub const KIND_CUSTOM: &str = "custom";
+/// ITP reminders go by WhatsApp or by SMS; everything else by WhatsApp.
 pub const CHANNEL_SMS: &str = "sms";
 pub const CHANNEL_WHATSAPP: &str = "whatsapp";
-const KINDS: [&str; 5] = [KIND_INSPECTION, "christmas", "new_year", "easter", KIND_FEEDBACK];
-/// Only greetings can carry a picture.
-const GREETING_KINDS: [&str; 3] = ["christmas", "new_year", "easter"];
+/// The texts that can be edited; custom messages carry their own.
+const TEMPLATE_KINDS: [&str; 3] = [KIND_INSPECTION, KIND_FEEDBACK, KIND_THANKS];
 const IMAGE_TYPES: [&str; 2] = ["image/jpeg", "image/png"];
 /// WhatsApp shrinks pictures anyway; larger files only slow sending down.
 pub const MAX_IMAGE_BYTES: usize = 3 * 1024 * 1024;
@@ -38,9 +40,11 @@ pub struct PendingMessage {
     pub plate: Option<String>,
     pub due_date: String,
     pub text: String,
-    /// The greeting has a picture to send with it.
+    /// The custom message this belongs to.
+    pub custom_id: Option<i64>,
+    /// The custom message has a picture to send with it.
     pub has_image: bool,
-    /// The last attempt in this round (this inspection cycle, holiday or visit):
+    /// The last attempt in this round (this inspection cycle, visit or custom message):
     /// "unsent", "sent" or "failed". Sent ones can still be sent again.
     pub status: String,
     /// When that last attempt was made.
@@ -66,6 +70,8 @@ fn attempt(value: Option<String>) -> (String, Option<String>) {
 pub struct SentMessage {
     message_id: i64,
     kind: String,
+    /// For custom messages, their name (empty once the custom message is deleted).
+    custom_name: Option<String>,
     channel: String,
     phone: String,
     plate: Option<String>,
@@ -79,7 +85,20 @@ pub struct SentMessage {
 pub struct Template {
     kind: String,
     text: String,
-    /// The greeting's picture as a data URL, for showing it; not read when saving.
+}
+
+/// A message written for the cars inspected in a period.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomMessage {
+    #[serde(default)]
+    id: Option<i64>,
+    name: String,
+    text: String,
+    /// Inspections from this day to `to`, both included.
+    from: String,
+    to: String,
+    /// The picture as a data URL, for showing it; not read when saving.
     #[serde(default, skip_deserializing)]
     image: Option<String>,
 }
@@ -88,55 +107,6 @@ pub struct Template {
 pub struct MessageImage {
     pub mime: String,
     pub base64: String,
-}
-
-/// Orthodox Easter for a year between 1900 and 2099, as the Julian date
-/// (month, day). The Gregorian date is 13 days later.
-fn julian_orthodox_easter(year: i32) -> (i32, i32) {
-    let (a, b, c) = (year % 4, year % 7, year % 19);
-    let d = (19 * c + 15) % 30;
-    let e = (2 * a + 4 * b - d + 34) % 7;
-    let total = d + e + 114;
-    (total / 31, total % 31 + 1)
-}
-
-fn orthodox_easter(conn: &Connection, year: i32) -> Result<String> {
-    let (month, day) = julian_orthodox_easter(year);
-    Ok(conn.query_row(
-        "SELECT date(printf('%04d-%02d-%02d', ?1, ?2, ?3), '+13 days')",
-        params![year, month, day],
-        |row| row.get(0),
-    )?)
-}
-
-struct Holiday {
-    kind: &'static str,
-    date: String,
-    window_start: String,
-}
-
-/// The holidays whose greeting window includes `today`.
-fn active_holidays(conn: &Connection, today: &str) -> Result<Vec<Holiday>> {
-    let year: i32 = today[..4].parse().map_err(|_| AppError::code("invalid_date"))?;
-    let mut active = Vec::new();
-    for candidate_year in [year, year + 1] {
-        let dates = [
-            ("christmas", format!("{candidate_year}-12-25")),
-            ("new_year", format!("{candidate_year}-01-01")),
-            ("easter", orthodox_easter(conn, candidate_year)?),
-        ];
-        for (kind, date) in dates {
-            let window_start: String = conn.query_row(
-                "SELECT date(?1, ?2)",
-                params![date, format!("-{GREETING_LEAD_DAYS} days")],
-                |row| row.get(0),
-            )?;
-            if window_start.as_str() <= today && today <= date.as_str() {
-                active.push(Holiday { kind, date, window_start });
-            }
-        }
-    }
-    Ok(active)
 }
 
 fn template(conn: &Connection, kind: &str) -> Result<String> {
@@ -230,6 +200,7 @@ fn due_inspections(conn: &Connection, today: &str, days: i64) -> Result<Vec<Pend
                 text: text.clone(),
                 plate: Some(plate.clone()),
                 due_date: due_date.clone(),
+                custom_id: None,
                 has_image: false,
                 status: own.0.clone(),
                 last_attempt: own.1.clone(),
@@ -246,78 +217,46 @@ fn due_inspections(conn: &Connection, today: &str, days: i64) -> Result<Vec<Pend
     Ok(messages)
 }
 
-fn due_greetings(conn: &Connection, holiday: &Holiday) -> Result<Vec<PendingMessage>> {
-    let wording = template(conn, holiday.kind)?;
-    let has_image: bool = conn.query_row(
-        "SELECT Image IS NOT NULL FROM sms_templates WHERE Type = ?1",
-        [holiday.kind],
-        |row| row.get(0),
-    )?;
-    let mut statement = conn.prepare(
-        "SELECT cl.ClientID, cl.Phone,
-                (SELECT m.Status || '|' || m.SentAt FROM messages m INDEXED BY messages_client
-                 WHERE m.ClientID = cl.ClientID AND m.Type = ?1
-                   AND substr(m.SentAt, 1, 10) BETWEEN ?2 AND ?3
-                 ORDER BY m.SentAt DESC, m.MessageID DESC LIMIT 1)
-         FROM clients cl
-         WHERE cl.SmsOptOut = 0
-         ORDER BY cl.Phone",
-    )?;
-    let rows = statement.query_map(params![holiday.kind, holiday.window_start, holiday.date], |row| {
-        let client_id: i64 = row.get(0)?;
-        let (status, last_attempt) = attempt(row.get(2)?);
-        Ok(PendingMessage {
-            key: format!("{}:{client_id}:{}", holiday.kind, holiday.date),
-            kind: holiday.kind.to_string(),
-            channel: CHANNEL_WHATSAPP.to_string(),
-            client_id,
-            car_id: None,
-            phone: row.get(1)?,
-            plate: None,
-            due_date: holiday.date.clone(),
-            text: wording.clone(),
-            has_image,
-            status,
-            last_attempt,
-            other_status: None,
-            other_attempt: None,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
-/// A request for feedback for every car inspected today whose client agreed to it (the
-/// Feedback box in the car form), to whoever brought it, or to every linked client when that
-/// is not known. Each client gets one per inspection.
-fn due_feedback(conn: &Connection, today: &str) -> Result<Vec<PendingMessage>> {
-    let wording = template(conn, KIND_FEEDBACK)?;
-    let mut statement = conn.prepare(
-        "SELECT c.CarID, c.Plate, cl.ClientID, cl.Phone, i.Date,
+/// A thank-you or a feedback request for every car inspected in the last `AFTER_VISIT_DAYS`,
+/// to whoever brought it, or to every linked client when that is not known. Cars whose client
+/// agreed to give feedback (the Feedback box in the car form) get the request; the others get
+/// the thank-you. Each client gets one per inspection.
+fn due_after_visit(conn: &Connection, today: &str, kind: &str) -> Result<Vec<PendingMessage>> {
+    let wording = template(conn, kind)?;
+    let mut statement = conn.prepare(&format!(
+        "WITH visits AS MATERIALIZED (
+             SELECT InspectionID, CarID, ClientID, Date FROM inspections
+             WHERE Date BETWEEN date(?1, '-{back} days') AND ?1
+         ),
+         recipients AS (
+             SELECT InspectionID, ClientID FROM visits WHERE ClientID IS NOT NULL
+             UNION ALL
+             SELECT v.InspectionID, l.ClientID FROM visits v
+             JOIN carsclients l ON l.CarID = v.CarID WHERE v.ClientID IS NULL
+         )
+         SELECT c.CarID, c.Plate, cl.ClientID, cl.Phone, v.Date,
                 (SELECT m.Status || '|' || m.SentAt FROM messages m INDEXED BY messages_car
-                 WHERE m.Type = 'feedback' AND m.ClientID = cl.ClientID AND m.CarID = c.CarID
-                   AND substr(m.SentAt, 1, 10) >= i.Date
+                 WHERE m.Type = ?2 AND m.ClientID = cl.ClientID AND m.CarID = c.CarID
+                   AND substr(m.SentAt, 1, 10) >= v.Date
                  ORDER BY m.SentAt DESC, m.MessageID DESC LIMIT 1)
-         FROM inspections i
-         JOIN cars c ON c.CarID = i.CarID
-         JOIN (SELECT i2.InspectionID, i2.ClientID FROM inspections i2
-               WHERE i2.Date = ?1 AND i2.ClientID IS NOT NULL
-               UNION ALL
-               SELECT i2.InspectionID, l.ClientID FROM inspections i2
-               JOIN carsclients l ON l.CarID = i2.CarID
-               WHERE i2.Date = ?1 AND i2.ClientID IS NULL) r ON r.InspectionID = i.InspectionID
+         FROM recipients r
+         JOIN visits v ON v.InspectionID = r.InspectionID
+         JOIN cars c ON c.CarID = v.CarID
          JOIN clients cl ON cl.ClientID = r.ClientID
-         WHERE i.Date = ?1 AND cl.SmsOptOut = 0 AND c.Feedback = 1
-         ORDER BY c.Plate, cl.Phone",
-    )?;
-    let rows = statement.query_map([today], |row| {
+         WHERE cl.SmsOptOut = 0 AND c.Feedback = ?3
+         ORDER BY v.Date DESC, c.Plate, cl.Phone",
+        back = AFTER_VISIT_DAYS - 1,
+    ))?;
+    let wants_feedback = kind == KIND_FEEDBACK;
+    let rows = statement.query_map(params![today, kind, wants_feedback], |row| {
         let car_id: i64 = row.get(0)?;
         let plate: String = row.get(1)?;
         let client_id: i64 = row.get(2)?;
         let date: String = row.get(4)?;
         let (status, last_attempt) = attempt(row.get(5)?);
         Ok(PendingMessage {
-            key: format!("{KIND_FEEDBACK}:{client_id}:{car_id}:{date}"),
-            kind: KIND_FEEDBACK.to_string(),
+            key: format!("{kind}:{client_id}:{car_id}:{date}"),
+            kind: kind.to_string(),
             channel: CHANNEL_WHATSAPP.to_string(),
             client_id,
             car_id: Some(car_id),
@@ -325,6 +264,7 @@ fn due_feedback(conn: &Connection, today: &str) -> Result<Vec<PendingMessage>> {
             text: wording.replace("{plate}", &plate),
             plate: Some(plate),
             due_date: date,
+            custom_id: None,
             has_image: false,
             status,
             last_attempt,
@@ -335,17 +275,87 @@ fn due_feedback(conn: &Connection, today: &str) -> Result<Vec<PendingMessage>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn pending_at(conn: &Connection, today: &str, days: i64) -> Result<Vec<PendingMessage>> {
-    let mut all = due_inspections(conn, today, days)?;
-    for holiday in active_holidays(conn, today)? {
-        all.extend(due_greetings(conn, &holiday)?);
+/// Every custom message, to the cars inspected in its period: to whoever brought the car to
+/// its latest inspection there, or to every linked client when that is not known.
+fn due_custom(conn: &Connection) -> Result<Vec<PendingMessage>> {
+    let mut customs = conn.prepare(
+        "SELECT CustomID, Text, FromDate, ToDate, Image IS NOT NULL FROM custom_messages ORDER BY CustomID",
+    )?;
+    let customs = customs
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut statement = conn.prepare(
+        "WITH visits AS MATERIALIZED (
+             SELECT i.InspectionID, i.CarID, i.ClientID, i.Date FROM inspections i
+             WHERE i.Date BETWEEN ?1 AND ?2
+               AND i.Date = (SELECT MAX(i2.Date) FROM inspections i2
+                             WHERE i2.CarID = i.CarID AND i2.Date BETWEEN ?1 AND ?2)
+         ),
+         recipients AS (
+             SELECT InspectionID, ClientID FROM visits WHERE ClientID IS NOT NULL
+             UNION ALL
+             SELECT v.InspectionID, l.ClientID FROM visits v
+             JOIN carsclients l ON l.CarID = v.CarID WHERE v.ClientID IS NULL
+         )
+         SELECT c.CarID, c.Plate, cl.ClientID, cl.Phone, v.Date,
+                (SELECT m.Status || '|' || m.SentAt FROM messages m INDEXED BY messages_car
+                 WHERE m.CustomID = ?3 AND m.ClientID = cl.ClientID AND m.CarID = c.CarID
+                 ORDER BY m.SentAt DESC, m.MessageID DESC LIMIT 1)
+         FROM recipients r
+         JOIN visits v ON v.InspectionID = r.InspectionID
+         JOIN cars c ON c.CarID = v.CarID
+         JOIN clients cl ON cl.ClientID = r.ClientID
+         WHERE cl.SmsOptOut = 0
+         ORDER BY v.Date DESC, c.Plate, cl.Phone",
+    )?;
+    let mut all = Vec::new();
+    for (custom_id, wording, from, to, has_image) in customs {
+        let rows = statement.query_map(params![from, to, custom_id], |row| {
+            let car_id: i64 = row.get(0)?;
+            let plate: String = row.get(1)?;
+            let client_id: i64 = row.get(2)?;
+            let (status, last_attempt) = attempt(row.get(5)?);
+            Ok(PendingMessage {
+                key: format!("{KIND_CUSTOM}:{custom_id}:{client_id}:{car_id}"),
+                kind: KIND_CUSTOM.to_string(),
+                channel: CHANNEL_WHATSAPP.to_string(),
+                client_id,
+                car_id: Some(car_id),
+                phone: row.get(3)?,
+                text: wording.replace("{plate}", &plate),
+                plate: Some(plate),
+                due_date: row.get(4)?,
+                custom_id: Some(custom_id),
+                has_image,
+                status,
+                last_attempt,
+                other_status: None,
+                other_attempt: None,
+            })
+        })?;
+        all.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
     }
-    all.extend(due_feedback(conn, today)?);
     Ok(all)
 }
 
-/// Debug builds can pretend it is another day, to try the greetings outside the holidays.
-/// Sends are then recorded on that day too, so a greeting is not offered again.
+fn pending_at(conn: &Connection, today: &str, days: i64) -> Result<Vec<PendingMessage>> {
+    let mut all = due_inspections(conn, today, days)?;
+    all.extend(due_custom(conn)?);
+    all.extend(due_after_visit(conn, today, KIND_FEEDBACK)?);
+    all.extend(due_after_visit(conn, today, KIND_THANKS)?);
+    Ok(all)
+}
+
+/// Debug builds can pretend it is another day, to try the lists on other dates. Sends are then
+/// recorded on that day too, so a message is not offered again.
 fn today_override() -> Option<String> {
     #[cfg(debug_assertions)]
     if let Ok(today) = std::env::var("VEHICLE_INSPECTION_TODAY") {
@@ -364,9 +374,9 @@ pub fn pending(conn: &Connection, days: i64) -> Result<Vec<PendingMessage>> {
 
 pub fn record(conn: &Connection, message: &PendingMessage, sent: bool) -> Result<()> {
     conn.execute(
-        "INSERT INTO messages (ClientID, CarID, Type, Text, SentAt, Status, Channel)
+        "INSERT INTO messages (ClientID, CarID, Type, Text, SentAt, Status, Channel, CustomID)
          VALUES (?1, ?2, ?3, ?4,
-                 COALESCE(?6, date('now', 'localtime')) || strftime('T%H:%M:%S', 'now', 'localtime'), ?5, ?7)",
+                 COALESCE(?6, date('now', 'localtime')) || strftime('T%H:%M:%S', 'now', 'localtime'), ?5, ?7, ?8)",
         params![
             message.client_id,
             message.car_id,
@@ -375,6 +385,7 @@ pub fn record(conn: &Connection, message: &PendingMessage, sent: bool) -> Result
             if sent { "sent" } else { "failed" },
             today_override(),
             message.channel,
+            message.custom_id,
         ],
     )?;
     Ok(())
@@ -430,7 +441,8 @@ pub fn history(conn: &Connection, page: i64, filter: &HistoryFilter) -> Result<P
     ];
     let total: i64 = conn.query_row(&format!("SELECT COUNT(*) {matching}"), values, |row| row.get(0))?;
     let mut statement = conn.prepare(&format!(
-        "SELECT m.MessageID, m.Type, m.Channel, cl.Phone, c.Plate, m.Text, m.SentAt, m.Status
+        "SELECT m.MessageID, m.Type, m.Channel, cl.Phone, c.Plate, m.Text, m.SentAt, m.Status,
+                (SELECT cm.Name FROM custom_messages cm WHERE cm.CustomID = m.CustomID)
          {matching}
          ORDER BY m.SentAt DESC, m.MessageID DESC
          LIMIT ?1 OFFSET ?2"
@@ -446,6 +458,7 @@ pub fn history(conn: &Connection, page: i64, filter: &HistoryFilter) -> Result<P
                 text: row.get(5)?,
                 sent_at: row.get(6)?,
                 status: row.get(7)?,
+                custom_name: row.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -454,30 +467,96 @@ pub fn history(conn: &Connection, page: i64, filter: &HistoryFilter) -> Result<P
 
 pub fn templates(conn: &Connection) -> Result<Vec<Template>> {
     let mut statement = conn.prepare(
-        "SELECT Type, Text, Image, ImageType FROM sms_templates
-         ORDER BY CASE Type WHEN 'inspection' THEN 0 WHEN 'christmas' THEN 1
-                            WHEN 'new_year' THEN 2 WHEN 'easter' THEN 3 ELSE 4 END",
+        "SELECT Type, Text FROM sms_templates
+         ORDER BY CASE Type WHEN 'inspection' THEN 0 WHEN 'feedback' THEN 1 ELSE 2 END",
+    )?;
+    let rows = statement
+        .query_map([], |row| Ok(Template { kind: row.get(0)?, text: row.get(1)? }))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+pub fn save_template(conn: &Connection, input: Template) -> Result<()> {
+    let text = input.text.trim();
+    if text.is_empty() || !TEMPLATE_KINDS.contains(&input.kind.as_str()) {
+        return Err(AppError::code("required_fields"));
+    }
+    conn.execute("UPDATE sms_templates SET Text = ?1 WHERE Type = ?2", params![text, input.kind])?;
+    Ok(())
+}
+
+/// Every custom message, the newest first.
+pub fn custom_messages(conn: &Connection) -> Result<Vec<CustomMessage>> {
+    let mut statement = conn.prepare(
+        "SELECT CustomID, Name, Text, FromDate, ToDate, Image, ImageType FROM custom_messages
+         ORDER BY CustomID DESC",
     )?;
     let rows = statement
         .query_map([], |row| {
-            let image: Option<Vec<u8>> = row.get(2)?;
-            let mime: Option<String> = row.get(3)?;
-            Ok(Template {
-                kind: row.get(0)?,
-                text: row.get(1)?,
-                image: image.zip(mime).map(|(bytes, mime)| {
-                    format!("data:{mime};base64,{}", BASE64.encode(bytes))
-                }),
+            let image: Option<Vec<u8>> = row.get(5)?;
+            let mime: Option<String> = row.get(6)?;
+            Ok(CustomMessage {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                text: row.get(2)?,
+                from: row.get(3)?,
+                to: row.get(4)?,
+                image: image
+                    .zip(mime)
+                    .map(|(bytes, mime)| format!("data:{mime};base64,{}", BASE64.encode(bytes))),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
 
-/// Sets a greeting's picture from base64 file contents. Only JPEG and PNG, up to
+/// Adds or changes a custom message; returns its id. The picture is set on its own.
+pub fn save_custom_message(conn: &Connection, input: CustomMessage) -> Result<i64> {
+    let name = input.name.trim();
+    let text = input.text.trim();
+    if name.is_empty() || text.is_empty() {
+        return Err(AppError::code("required_fields"));
+    }
+    for day in [&input.from, &input.to] {
+        if !data::has_format(conn, "%Y-%m-%d", day)? {
+            return Err(AppError::code("invalid_date"));
+        }
+    }
+    if input.from > input.to {
+        return Err(AppError::code("invalid_date"));
+    }
+    match input.id {
+        Some(id) => {
+            let changed = conn.execute(
+                "UPDATE custom_messages SET Name = ?1, Text = ?2, FromDate = ?3, ToDate = ?4 WHERE CustomID = ?5",
+                params![name, text, input.from, input.to, id],
+            )?;
+            if changed == 0 {
+                return Err(AppError::code("not_found"));
+            }
+            Ok(id)
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO custom_messages (Name, Text, FromDate, ToDate, CreatedAt)
+                 VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))",
+                params![name, text, input.from, input.to],
+            )?;
+            Ok(conn.last_insert_rowid())
+        }
+    }
+}
+
+/// Deletes a custom message. Messages already sent stay in the history.
+pub fn delete_custom_message(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM custom_messages WHERE CustomID = ?1", [id])?;
+    Ok(())
+}
+
+/// Sets a custom message's picture from base64 file contents. Only JPEG and PNG, up to
 /// `MAX_IMAGE_BYTES`.
-pub fn save_template_image(conn: &Connection, kind: &str, data: &str, mime: &str) -> Result<()> {
-    if !GREETING_KINDS.contains(&kind) || !IMAGE_TYPES.contains(&mime) {
+pub fn save_custom_image(conn: &Connection, id: i64, data: &str, mime: &str) -> Result<()> {
+    if !IMAGE_TYPES.contains(&mime) {
         return Err(AppError::code("image_invalid"));
     }
     let bytes = BASE64.decode(data.trim()).map_err(|_| AppError::code("image_invalid"))?;
@@ -488,36 +567,27 @@ pub fn save_template_image(conn: &Connection, kind: &str, data: &str, mime: &str
         return Err(AppError::code("image_too_large"));
     }
     conn.execute(
-        "UPDATE sms_templates SET Image = ?1, ImageType = ?2 WHERE Type = ?3",
-        params![bytes, mime, kind],
+        "UPDATE custom_messages SET Image = ?1, ImageType = ?2 WHERE CustomID = ?3",
+        params![bytes, mime, id],
     )?;
     Ok(())
 }
 
-pub fn remove_template_image(conn: &Connection, kind: &str) -> Result<()> {
-    conn.execute("UPDATE sms_templates SET Image = NULL, ImageType = NULL WHERE Type = ?1", [kind])?;
+pub fn remove_custom_image(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("UPDATE custom_messages SET Image = NULL, ImageType = NULL WHERE CustomID = ?1", [id])?;
     Ok(())
 }
 
-/// The picture to send with this kind of message, if it has one.
-pub fn template_image(conn: &Connection, kind: &str) -> Result<Option<MessageImage>> {
+/// The picture to send with a custom message, if it has one.
+pub fn custom_image(conn: &Connection, id: i64) -> Result<Option<MessageImage>> {
     let found: Option<(Option<Vec<u8>>, Option<String>)> = conn
-        .query_row("SELECT Image, ImageType FROM sms_templates WHERE Type = ?1", [kind], |row| {
+        .query_row("SELECT Image, ImageType FROM custom_messages WHERE CustomID = ?1", [id], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })
         .optional()?;
     Ok(found.and_then(|(bytes, mime)| {
         Some(MessageImage { base64: BASE64.encode(bytes?), mime: mime? })
     }))
-}
-
-pub fn save_template(conn: &Connection, input: Template) -> Result<()> {
-    let text = input.text.trim();
-    if text.is_empty() || !KINDS.contains(&input.kind.as_str()) {
-        return Err(AppError::code("required_fields"));
-    }
-    conn.execute("UPDATE sms_templates SET Text = ?1 WHERE Type = ?2", params![text, input.kind])?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -587,24 +657,6 @@ mod tests {
 
     fn inspection(phone: &str) -> (String, String) {
         ("inspection".to_string(), phone.to_string())
-    }
-
-    fn greeting(kind: &str, phone: &str) -> (String, String) {
-        (kind.to_string(), phone.to_string())
-    }
-
-    #[test]
-    fn orthodox_easter_matches_known_dates() {
-        let conn = test_connection();
-        for (year, date) in [
-            (2024, "2024-05-05"),
-            (2025, "2025-04-20"),
-            (2026, "2026-04-12"),
-            (2027, "2027-05-02"),
-            (2028, "2028-04-16"),
-        ] {
-            assert_eq!(orthodox_easter(&conn, year).unwrap(), date);
-        }
     }
 
     #[test]
@@ -687,17 +739,17 @@ mod tests {
     }
 
     #[test]
-    fn feedback_goes_to_whoever_brought_a_car_inspected_today() {
+    fn feedback_goes_to_whoever_brought_a_car_inspected_this_week() {
         let conn = test_connection();
         let car = add_car(&conn, "B1AAA", Some(TODAY));
         // The owner is linked but did not come, so gets nothing.
         add_client(&conn, "0722000001", Some(car));
         let driver = add_client(&conn, "0722000002", Some(car));
         inspect(&conn, Some(driver), car, TODAY);
-        // Inspected yesterday: no feedback today.
-        let earlier = add_car(&conn, "B2AAA", Some("2030-06-14"));
+        // Inspected eight days ago: past the week.
+        let earlier = add_car(&conn, "B2AAA", Some("2030-06-07"));
         let other = add_client(&conn, "0722000003", Some(earlier));
-        inspect(&conn, Some(other), earlier, "2030-06-14");
+        inspect(&conn, Some(other), earlier, "2030-06-07");
 
         assert_eq!(kinds_on(&conn, TODAY, "feedback"), ["0722000002"]);
         let message = pending_at(&conn, TODAY, DAYS)
@@ -743,7 +795,6 @@ mod tests {
         conn.execute("UPDATE clients SET SmsOptOut = 1 WHERE ClientID = ?1", [client]).unwrap();
 
         assert!(phones(&conn).is_empty());
-        assert!(phones_on(&conn, "2030-12-25").is_empty());
     }
 
     #[test]
@@ -780,79 +831,102 @@ mod tests {
     }
 
     #[test]
-    fn greetings_appear_three_days_before_and_end_after_the_day() {
+    fn feedback_and_thanks_stay_for_a_week_after_the_inspection() {
         let conn = test_connection();
-        add_client(&conn, "0722000001", None);
-        let christmas = [greeting("christmas", "0722000001")];
+        let asked = add_car(&conn, "B1AAA", Some("2030-06-09"));
+        let thanked = add_car(&conn, "B2AAA", Some("2030-06-09"));
+        conn.execute("UPDATE cars SET Feedback = 0 WHERE CarID = ?1", [thanked]).unwrap();
+        let first = add_client(&conn, "0722000001", Some(asked));
+        let second = add_client(&conn, "0722000002", Some(thanked));
+        inspect(&conn, Some(first), asked, "2030-06-09");
+        inspect(&conn, Some(second), thanked, "2030-06-09");
 
-        assert!(phones_on(&conn, "2030-12-21").is_empty());
-        assert_eq!(phones_on(&conn, "2030-12-22"), christmas);
-        assert_eq!(phones_on(&conn, "2030-12-25"), christmas);
-        assert!(phones_on(&conn, "2030-12-26").is_empty());
+        // 9 June is the first of the seven days up to 15 June.
+        assert_eq!(kinds_on(&conn, TODAY, KIND_FEEDBACK), ["0722000001"]);
+        assert_eq!(kinds_on(&conn, TODAY, KIND_THANKS), ["0722000002"]);
+        assert!(kinds_on(&conn, "2030-06-16", KIND_FEEDBACK).is_empty());
+        assert!(kinds_on(&conn, "2030-06-16", KIND_THANKS).is_empty());
+        let thanks = pending_at(&conn, TODAY, DAYS).unwrap().into_iter().find(|m| m.kind == KIND_THANKS).unwrap();
+        assert!(thanks.text.contains("B2AAA"), "{}", thanks.text);
+        assert_eq!(thanks.channel, CHANNEL_WHATSAPP);
     }
 
     #[test]
-    fn new_year_window_crosses_the_year_end() {
+    fn custom_messages_go_to_the_cars_inspected_in_their_period() {
         let conn = test_connection();
-        add_client(&conn, "0722000001", None);
-        let new_year = [greeting("new_year", "0722000001")];
+        let inside = add_car(&conn, "B1AAA", Some("2030-03-10"));
+        let outside = add_car(&conn, "B2AAA", Some("2030-05-10"));
+        let owner = add_client(&conn, "0722000001", Some(inside));
+        let other = add_client(&conn, "0722000002", Some(outside));
+        inspect(&conn, Some(owner), inside, "2030-03-01");
+        inspect(&conn, Some(owner), inside, "2030-03-10");
+        inspect(&conn, Some(other), outside, "2030-05-10");
 
-        assert_eq!(phones_on(&conn, "2030-12-29"), new_year);
-        assert_eq!(phones_on(&conn, "2031-01-01"), new_year);
-        assert!(phones_on(&conn, "2031-01-02").is_empty());
+        let message = |id: Option<i64>, text: &str| CustomMessage {
+            id,
+            name: "Primăvară".into(),
+            text: text.into(),
+            from: "2030-03-01".into(),
+            to: "2030-03-31".into(),
+            image: None,
+        };
+        let id = save_custom_message(&conn, message(None, "Salut {plate}!")).unwrap();
+        let custom: Vec<PendingMessage> =
+            pending_at(&conn, TODAY, DAYS).unwrap().into_iter().filter(|m| m.kind == KIND_CUSTOM).collect();
+        // Once per car, for its latest visit in the period.
+        assert_eq!(custom.len(), 1);
+        assert_eq!(custom[0].text, "Salut B1AAA!");
+        assert_eq!(custom[0].due_date, "2030-03-10");
+        assert_eq!(custom[0].custom_id, Some(id));
+
+        record(&conn, &custom[0], true).unwrap();
+        let again = pending_at(&conn, TODAY, DAYS).unwrap().into_iter().find(|m| m.kind == KIND_CUSTOM).unwrap();
+        assert_eq!(again.status, "sent");
+
+        save_custom_message(&conn, message(Some(id), "Altceva")).unwrap();
+        assert_eq!(custom_messages(&conn).unwrap()[0].text, "Altceva");
+        delete_custom_message(&conn, id).unwrap();
+        assert!(pending_at(&conn, TODAY, DAYS).unwrap().iter().all(|m| m.kind != KIND_CUSTOM));
+        // What was sent stays in the history.
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE Type = 'custom'", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
-    fn easter_uses_the_orthodox_date() {
+    fn custom_messages_need_a_name_text_and_a_period_in_order() {
         let conn = test_connection();
-        add_client(&conn, "0722000001", None);
-        assert_eq!(phones_on(&conn, "2026-04-12"), [greeting("easter", "0722000001")]);
-        assert!(phones_on(&conn, "2026-04-05").is_empty());
+        let message = |name: &str, from: &str, to: &str| CustomMessage {
+            id: None,
+            name: name.into(),
+            text: "Salut".into(),
+            from: from.into(),
+            to: to.into(),
+            image: None,
+        };
+        assert_eq!(save_custom_message(&conn, message(" ", "2030-01-01", "2030-01-31")), Err(AppError::code("required_fields")));
+        assert_eq!(save_custom_message(&conn, message("A", "2030-02-01", "2030-01-31")), Err(AppError::code("invalid_date")));
+        assert_eq!(save_custom_message(&conn, message("A", "2030-02-30", "2030-03-01")), Err(AppError::code("invalid_date")));
     }
 
     #[test]
-    fn one_greeting_per_holiday_but_again_next_year() {
+    fn custom_messages_can_carry_a_small_jpeg_or_png_picture() {
         let conn = test_connection();
-        let client = add_client(&conn, "0722000001", None);
-        log(&conn, client, None, "christmas", "2030-12-23T10:00:00", "sent");
-
-        assert!(phones_on(&conn, "2030-12-25").is_empty());
-        assert_eq!(phones_on(&conn, "2031-12-25"), [greeting("christmas", "0722000001")]);
-    }
-
-    #[test]
-    fn greetings_can_carry_a_picture() {
-        let conn = test_connection();
-        add_client(&conn, "0722000001", None);
-        let png = BASE64.encode([137u8, 80, 78, 71]);
-        save_template_image(&conn, "christmas", &png, "image/png").unwrap();
-
-        let christmas = pending_at(&conn, "2030-12-24", DAYS).unwrap();
-        assert!(christmas[0].has_image);
-        assert!(!pending_at(&conn, "2030-12-30", DAYS).unwrap()[0].has_image);
-        let image = template_image(&conn, "christmas").unwrap().unwrap();
-        assert_eq!((image.mime.as_str(), image.base64.as_str()), ("image/png", png.as_str()));
-        let listed = templates(&conn).unwrap();
-        let shown = listed.iter().find(|t| t.kind == "christmas").unwrap();
-        assert_eq!(shown.image.as_deref(), Some(format!("data:image/png;base64,{png}").as_str()));
-
-        remove_template_image(&conn, "christmas").unwrap();
-        assert!(template_image(&conn, "christmas").unwrap().is_none());
-    }
-
-    #[test]
-    fn only_greetings_take_small_jpeg_or_png_pictures() {
-        let conn = test_connection();
-        let small = BASE64.encode([1u8, 2, 3]);
+        let id = save_custom_message(
+            &conn,
+            CustomMessage { id: None, name: "A".into(), text: "B".into(), from: "2030-01-01".into(), to: "2030-01-02".into(), image: None },
+        )
+        .unwrap();
+        let png = BASE64.encode([0x89, b'P', b'N', b'G']);
+        save_custom_image(&conn, id, &png, "image/png").unwrap();
+        assert_eq!(custom_image(&conn, id).unwrap().unwrap().mime, "image/png");
+        assert!(custom_messages(&conn).unwrap()[0].image.as_deref().unwrap().starts_with("data:image/png;base64,"));
         let invalid = Some(AppError::code("image_invalid"));
-        assert_eq!(save_template_image(&conn, "inspection", &small, "image/png").err(), invalid);
-        assert_eq!(save_template_image(&conn, "easter", &small, "image/gif").err(), invalid);
-        assert_eq!(save_template_image(&conn, "easter", "not base64!", "image/png").err(), invalid);
+        assert_eq!(save_custom_image(&conn, id, &png, "image/gif").err(), invalid);
+        assert_eq!(save_custom_image(&conn, id, "not base64!", "image/png").err(), invalid);
         let large = BASE64.encode(vec![0u8; MAX_IMAGE_BYTES + 1]);
-        assert_eq!(
-            save_template_image(&conn, "easter", &large, "image/jpeg").err(),
-            Some(AppError::code("image_too_large"))
-        );
+        assert_eq!(save_custom_image(&conn, id, &large, "image/jpeg").err(), Some(AppError::code("image_too_large")));
+        remove_custom_image(&conn, id).unwrap();
+        assert!(custom_image(&conn, id).unwrap().is_none());
     }
 
     #[test]
@@ -860,12 +934,13 @@ mod tests {
         let conn = test_connection();
         let car = add_car(&conn, "B1AAA", Some("2029-07-15"));
         add_client(&conn, "0722000001", Some(car));
-        save_template(&conn, Template { kind: "inspection".into(), text: " Salut {plate} ".into(), image: None })
-            .unwrap();
+        save_template(&conn, Template { kind: "inspection".into(), text: " Salut {plate} ".into() }).unwrap();
         assert_eq!(pending_at(&conn, TODAY, DAYS).unwrap()[0].text, "Salut B1AAA");
 
-        let empty = Template { kind: "inspection".into(), text: "  ".into(), image: None };
+        let empty = Template { kind: "inspection".into(), text: "  ".into() };
         assert_eq!(save_template(&conn, empty), Err(AppError::code("required_fields")));
+        let gone = Template { kind: "christmas".into(), text: "Crăciun fericit".into() };
+        assert_eq!(save_template(&conn, gone), Err(AppError::code("required_fields")));
     }
 
     #[test]
@@ -979,22 +1054,5 @@ mod tests {
         assert_eq!(sms.other_status.as_deref(), Some("failed"));
     }
 
-    #[test]
-    fn sent_greetings_stay_listed_with_their_status_to_send_again() {
-        let conn = test_connection();
-        let client = add_client(&conn, "0722000001", None);
-        add_client(&conn, "0722000002", None);
-        log_by(&conn, client, None, "christmas", "2030-12-23T10:00:00", "sent", CHANNEL_WHATSAPP);
-
-        let statuses: Vec<(String, String)> = pending_at(&conn, "2030-12-24", DAYS)
-            .unwrap()
-            .into_iter()
-            .map(|message| (message.phone, message.status))
-            .collect();
-        assert_eq!(
-            statuses,
-            [("0722000001".to_string(), "sent".to_string()), ("0722000002".to_string(), "unsent".to_string())]
-        );
-    }
 
 }

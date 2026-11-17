@@ -209,13 +209,28 @@ pub async fn whatsapp_log_out(app: AppHandle) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-pub fn sms_save_template_image(db: Db<'_>, kind: String, data: String, mime: String) -> Result<(), AppError> {
-    db.with(|conn| sms::save_template_image(conn, &kind, &data, &mime))
+pub fn sms_custom_messages(db: Db<'_>) -> Result<Vec<sms::CustomMessage>, AppError> {
+    db.with(|conn| sms::custom_messages(conn))
 }
 
 #[tauri::command]
-pub fn sms_remove_template_image(db: Db<'_>, kind: String) -> Result<(), AppError> {
-    db.with(|conn| sms::remove_template_image(conn, &kind))
+pub fn sms_save_custom_message(db: Db<'_>, message: sms::CustomMessage) -> Result<i64, AppError> {
+    db.with(|conn| sms::save_custom_message(conn, message))
+}
+
+#[tauri::command]
+pub fn sms_delete_custom_message(db: Db<'_>, id: i64) -> Result<(), AppError> {
+    db.with(|conn| sms::delete_custom_message(conn, id))
+}
+
+#[tauri::command]
+pub fn sms_save_custom_image(db: Db<'_>, id: i64, data: String, mime: String) -> Result<(), AppError> {
+    db.with(|conn| sms::save_custom_image(conn, id, &data, &mime))
+}
+
+#[tauri::command]
+pub fn sms_remove_custom_image(db: Db<'_>, id: i64) -> Result<(), AppError> {
+    db.with(|conn| sms::remove_custom_image(conn, id))
 }
 
 #[tauri::command]

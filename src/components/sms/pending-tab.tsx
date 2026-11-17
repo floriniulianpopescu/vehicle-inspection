@@ -37,15 +37,16 @@ type StatusFilter = "all" | "unsent" | "failed" | "sent";
 const STATUS_FILTERS: StatusFilter[] = ["all", "unsent", "failed", "sent"];
 
 /**
- * The message lists of the Auto SMS page. ITP reminders go by WhatsApp first; whoever
- * WhatsApp fails then appears in the SMS list. Greetings and feedback go by WhatsApp.
+ * The message lists of the Messages page. ITP reminders go by WhatsApp or by SMS; custom
+ * messages, feedback requests and thank-yous go by WhatsApp.
  */
-export type Group = "remindersWhatsapp" | "remindersSms" | "greetings" | "feedback";
+export type Group = "remindersWhatsapp" | "remindersSms" | "custom" | "feedback" | "thanks";
 
 function groupOf(item: PendingMessage): Group {
   if (item.kind === "inspection") return item.channel === "sms" ? "remindersSms" : "remindersWhatsapp";
   if (item.kind === "feedback") return "feedback";
-  return "greetings";
+  if (item.kind === "thanks") return "thanks";
+  return "custom";
 }
 
 /** Expired means the ITP date has passed. */
@@ -125,21 +126,30 @@ export type PendingMessages = ReturnType<typeof usePendingMessages>;
  * of the current round is listed with its status, so a failed or already sent one can be sent
  * again. Sent ones start unticked, so "select all" does not repeat them by accident.
  */
-export function PendingTab({ group, shared }: { group: Group; shared: PendingMessages }) {
+export function PendingTab({
+  group,
+  shared,
+  customId = null,
+}: {
+  group: Group;
+  shared: PendingMessages;
+  /** For custom messages: which one to list. */
+  customId?: number | null;
+}) {
   const { t } = useI18n();
   const text = t.sms;
   const isSms = group === "remindersSms";
   const isReminder = group === "remindersSms" || group === "remindersWhatsapp";
   const channel = isSms ? "sms" : "whatsapp";
   const { all, reload, progress, configured, days, setDays } = shared;
-  const filters = useMessageFilters(
-    group === "greetings" ? t.data.date : group === "feedback" ? t.sms.inspectedOn : t.data.nextRevision,
-  );
+  // Only the reminder lists are long enough to need a search and a period.
+  const filters = useMessageFilters(t.data.nextRevision);
+  const inGroup = (item: PendingMessage) =>
+    groupOf(item) === group && (group !== "custom" || item.customId === customId);
   const items = all.filter(
     (item) =>
-      groupOf(item) === group &&
-      matchesSearch(item, filters.search) &&
-      withinDays(item.dueDate, filters.from, filters.to),
+      inGroup(item) &&
+      (!isReminder || (matchesSearch(item, filters.search) && withinDays(item.dueDate, filters.from, filters.to))),
   );
   // Ticks the person changed; everything else follows its status.
   const [overrides, setOverrides] = useState<Map<string, boolean>>(new Map());
@@ -165,7 +175,7 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
   // After a send the statuses change, so the default ticks apply again. A reload that changes
   // nothing keeps the ticks as they are.
   const statuses = all
-    .filter((item) => groupOf(item) === group)
+    .filter(inGroup)
     .map((item) => `${item.key}=${item.status}`)
     .join();
   useEffect(() => setOverrides(new Map()), [statuses]);
@@ -265,7 +275,9 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
         ? text.remindersSmsNote
         : group === "feedback"
           ? text.feedbackNote
-          : null;
+          : group === "thanks"
+            ? text.thanksNote
+            : null;
 
   return (
     <div className="flex flex-col gap-3">
@@ -354,7 +366,7 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
       )}
       {progress?.error && <FormError message={errorMessage(t, progress.error)} />}
 
-      {filters.bar}
+      {isReminder && filters.bar}
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         {isReminder && (
@@ -403,10 +415,10 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
               />
             </TableHead>
             <TableHead>{text.status}</TableHead>
-            {group === "greetings" && <TableHead>{text.type}</TableHead>}
+
             <TableHead>{t.data.phone}</TableHead>
-            {group !== "greetings" && <TableHead>{t.data.plate}</TableHead>}
-            <TableHead>{isReminder ? t.data.nextRevision : t.data.date}</TableHead>
+            <TableHead>{t.data.plate}</TableHead>
+            <TableHead>{isReminder ? t.data.nextRevision : text.inspectedOnShort}</TableHead>
             <TableHead>{text.message}</TableHead>
           </TableRow>
         </TableHeader>
@@ -440,22 +452,17 @@ export function PendingTab({ group, shared }: { group: Group; shared: PendingMes
                   )}
                 </span>
               </TableCell>
-              {group === "greetings" && (
-                <TableCell>
-                  <span className="flex items-center gap-1.5">
-                    <Badge variant="secondary">{text.kinds[item.kind]}</Badge>
-                    {item.hasImage && (
-                      <ImageIcon className="size-4 text-muted-foreground" aria-label={text.withImage} />
-                    )}
-                  </span>
-                </TableCell>
-              )}
               <TableCell className="whitespace-nowrap">{formatPhone(item.phone)}</TableCell>
-              {group !== "greetings" && (
-                <TableCell className="font-medium">{item.plate ?? "-"}</TableCell>
-              )}
+              <TableCell className="font-medium">{item.plate ?? "-"}</TableCell>
               <TableCell>{displayDate(item.dueDate)}</TableCell>
-              <TableCell className="whitespace-normal">{item.text}</TableCell>
+              <TableCell className="whitespace-normal">
+                <span className="flex items-start gap-1.5">
+                  {item.hasImage && (
+                    <ImageIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-label={text.withImage} />
+                  )}
+                  {item.text}
+                </span>
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>

@@ -216,7 +216,15 @@ export type DashboardPoint = { key: string; value: number; parts?: number[] };
 export type DashboardSeries = { points: DashboardPoint[]; grouping: Grouping | null; parts: string[] | null };
 export type DashboardSummary = { cars: number; inspections: number; expired: number; messagesSent: number };
 
-export type SmsKind = "inspection" | "christmas" | "new_year" | "easter" | "feedback";
+/** Holiday greetings are no longer sent, but older ones stay in the history. */
+export type SmsKind =
+  | "inspection"
+  | "feedback"
+  | "thanks"
+  | "custom"
+  | "christmas"
+  | "new_year"
+  | "easter";
 export type PendingMessage = {
   key: string;
   kind: SmsKind;
@@ -229,6 +237,8 @@ export type PendingMessage = {
   text: string;
   /** The greeting has a picture to send with it. */
   hasImage: boolean;
+  /** The custom message this belongs to. */
+  customId: number | null;
   /** The last attempt in this round; sent ones can be sent again. */
   status: "unsent" | "sent" | "failed";
   lastAttempt: string | null;
@@ -239,6 +249,8 @@ export type PendingMessage = {
 export type SentMessage = {
   messageId: number;
   kind: SmsKind;
+  /** For custom messages, their name; empty once the custom message is deleted. */
+  customName: string | null;
   channel: "sms" | "whatsapp";
   phone: string;
   plate: string | null;
@@ -254,8 +266,17 @@ export type SendProgress = {
   failed: number;
   error: string | null;
 };
-/** `image` is a data URL, only for greetings that have a picture. */
-export type SmsTemplate = { kind: SmsKind; text: string; image?: string | null };
+export type SmsTemplate = { kind: SmsKind; text: string };
+/** A message for the cars inspected between `from` and `to` (both included). */
+export type CustomMessage = {
+  id: number | null;
+  name: string;
+  text: string;
+  from: string;
+  to: string;
+  /** The picture as a data URL. */
+  image?: string | null;
+};
 export type WhatsAppConnection = "closed" | "loading" | "qr" | "ready";
 export type GatewaySettings = { address: string; username: string; hasPassword: boolean };
 
@@ -287,9 +308,15 @@ export const api = {
   smsTemplates: () => invoke<SmsTemplate[]>("sms_templates"),
   smsSaveTemplate: (template: SmsTemplate) =>
     invoke<void>("sms_save_template", { template: { kind: template.kind, text: template.text } }),
-  smsSaveTemplateImage: (kind: SmsKind, data: string, mime: string) =>
-    invoke<void>("sms_save_template_image", { kind, data, mime }),
-  smsRemoveTemplateImage: (kind: SmsKind) => invoke<void>("sms_remove_template_image", { kind }),
+  smsCustomMessages: () => invoke<CustomMessage[]>("sms_custom_messages"),
+  smsSaveCustomMessage: (message: CustomMessage) =>
+    invoke<number>("sms_save_custom_message", {
+      message: { id: message.id, name: message.name, text: message.text, from: message.from, to: message.to },
+    }),
+  smsDeleteCustomMessage: (id: number) => invoke<void>("sms_delete_custom_message", { id }),
+  smsSaveCustomImage: (id: number, data: string, mime: string) =>
+    invoke<void>("sms_save_custom_image", { id, data, mime }),
+  smsRemoveCustomImage: (id: number) => invoke<void>("sms_remove_custom_image", { id }),
   smsGatewaySettings: () => invoke<GatewaySettings>("sms_gateway_settings"),
   smsSaveGatewaySettings: (address: string, username: string, password: string | null) =>
     invoke<GatewaySettings>("sms_save_gateway_settings", { address, username, password }),

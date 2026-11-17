@@ -21,9 +21,9 @@ use gateway::Gateway;
 use pending::{CHANNEL_SMS, CHANNEL_WHATSAPP};
 use crate::whatsapp;
 pub use pending::{
-    HistoryFilter,
-    MessageImage, PendingMessage, SentMessage, Template, history, remove_template_image, save_template,
-    save_template_image, templates,
+    CustomMessage, HistoryFilter, MessageImage, PendingMessage, SentMessage, Template, custom_messages,
+    delete_custom_message, history, remove_custom_image, save_custom_image, save_custom_message,
+    save_template, templates,
 };
 use pending::{DEFAULT_REMINDER_DAYS, MAX_REMINDER_DAYS};
 
@@ -339,10 +339,11 @@ async fn send_batch(
         previous_start = Some(Instant::now());
         let sent = if message.channel == CHANNEL_WHATSAPP {
             let stop = whatsapp::Stop { requested: &service.stop_requested, signal: &service.stop_signal };
-            let image = if message.has_image {
-                app.state::<Database>().with(|conn| pending::template_image(conn, &message.kind))?
-            } else {
-                None
+            let image = match message.custom_id {
+                Some(id) if message.has_image => {
+                    app.state::<Database>().with(|conn| pending::custom_image(conn, id))?
+                }
+                _ => None,
             };
             match whatsapp::send(app, &message.phone, &message.text, image.as_ref(), &stop).await? {
                 whatsapp::Outcome::Sent => true,
