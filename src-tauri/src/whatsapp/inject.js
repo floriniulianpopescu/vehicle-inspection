@@ -21,6 +21,18 @@
 
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const flat = (text) => (text || "").replace(/[\s​‎‏﻿]+/g, " ").trim();
+  /**
+   * Text reduced to its letters and digits, for comparing what WhatsApp shows with what was
+   * sent: it may swap spaces for non-breaking ones, turn emoji into pictures, split the text
+   * into pieces or write ş/ţ for ș/ț, and the text is still ours.
+   */
+  const loose = (text) =>
+    (text || "")
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/ş/g, "ș")
+      .replace(/ţ/g, "ț")
+      .replace(/[^\p{L}\p{N}]+/gu, "");
 
   function state() {
     if (document.querySelector("#pane-side, #side, [data-testid='chat-list']")) return "ready";
@@ -34,7 +46,8 @@
 
   /** The message box: the editable field that holds exactly our text. */
   function composerWith(expected) {
-    return editables().find((field) => flat(field.textContent) === expected) || null;
+    const wanted = loose(expected);
+    return editables().find((field) => wanted !== "" && loose(field.textContent) === wanted) || null;
   }
 
   // WhatsApp shows a dialog when the number from the link is not on WhatsApp.
@@ -139,7 +152,8 @@
   /** The newest element in the chat, outside any editable field, that shows our text. */
   function shownMessage(panel, snippet) {
     const fields = editables();
-    const holds = (element) => flat(element.textContent).includes(snippet);
+    const wanted = loose(snippet);
+    const holds = (element) => loose(element.textContent).includes(wanted);
     // WhatsApp splits a message's text into nested pieces (formatting, line breaks, emoji), so
     // the match is the innermost element holding the text, whatever else it contains.
     const candidates = [...panel.querySelectorAll("span, div")].filter(
@@ -255,7 +269,7 @@
     if (!opened) return finish("image_not_attached");
     if (stopped()) return finish("cancelled");
 
-    if (!flat(opened.caption.textContent).includes(snippet)) {
+    if (!loose(opened.caption.textContent).includes(loose(snippet))) {
       trace("writing the caption");
       opened.caption.focus();
       document.execCommand("insertText", false, text);
@@ -310,7 +324,17 @@
       if (box) break;
       await wait(POLL_MS);
     }
-    if (!box) return finish("timeout_no_text");
+    if (!box) {
+      // Says what the message boxes held instead, to see why ours was not recognised.
+      const seen = editables()
+        .map((field) => {
+          const shown = flat(field.textContent);
+          return `${describe(field)} ${shown.length} chars "${shown.slice(0, 30)}"`;
+        })
+        .join(" | ");
+      trace(`message box not found; expected ${expected.length} chars "${expected.slice(0, 30)}"; fields: ${seen || "none"}`);
+      return finish("timeout_no_text");
+    }
 
     // Let WhatsApp finish setting up the chat before pressing anything.
     await wait(1500);
